@@ -1,5 +1,7 @@
 # The Lost World PC VR — Supermodel with OpenXR
 
+<p align="center"><img src="Docs/Images/title-screen.jpg" width="620" alt="The Lost World: Jurassic Park title screen running in Supermodel" /></p>
+
 Play Sega's 1997 light-gun arcade game **The Lost World: Jurassic Park** in VR. This is a fork of the [Supermodel](https://github.com/trzy/Supermodel) Sega Model 3 emulator with an OpenXR mode. Your PC runs the emulator and streams it to the headset.
 
 ## Features
