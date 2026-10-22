@@ -69,7 +69,7 @@ In the options menu, point at an option and pull the trigger.
 
 The buttons at the bottom resume the game, re-centre the view or quit. Settings are saved to `Config/Supermodel.ini`. The menu's typeface is [Russo One](https://fonts.google.com/specimen/Russo+One) by Jovanny Lemonad (SIL Open Font License; the included Latin subset is renamed "LW Menu"). You can frame the menu with your own artwork, see `Assets/VR-MENU.txt`.
 
-**Gun models.** No gun model is included: The Lost World's ROM doesn't contain one. Both slots take a Wavefront OBJ (with an optional `.mtl`): `Assets/VRGameGun.obj` for *Game*, drawn in the blue or red chosen in the menu, and `Assets/VRGunModel.obj` for *Custom*, in its own material colours. Units are metres, the hand / grip at the origin, the barrel pointing along −Z and +Y up. The material's `Ks` (0–1) sets the strength of the sheen and `Ns` its sharpness (about 10 for matte plastic, 100 for glossy); `Kd` sets the colour of a Custom model.
+**Gun models.** Both slots take a Wavefront OBJ (with an optional `.mtl`): `Assets/VRGameGun.obj` for *Game*, drawn in the blue or red chosen in the menu, and `Assets/VRGunModel.obj` for *Custom*, in its own material colours. Units are metres, the hand / grip at the origin, the barrel pointing along −Z and +Y up. The material's `Ks` (0–1) sets the strength of the sheen and `Ns` its sharpness (about 10 for matte plastic, 100 for glossy); `Kd` sets the colour of a Custom model.
 
 For the smoothest play in Virtual Desktop, set Synchronous Spacewarp to **Disabled** and the frame rate to 72, 90 or 120 Hz. All VR settings are in `Config/Supermodel.ini`, documented in [`Docs/PCVR.txt`](Docs/PCVR.txt).
 
