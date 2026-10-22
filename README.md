@@ -36,6 +36,7 @@ Developed and tested on a Meta Quest 3 streamed with **Virtual Desktop** (VDXR r
 | Controller | Action |
 |---|---|
 | Trigger (gun hand) | Fire. The gun is in the hand chosen in the options: right or left. |
+| Grip (gun hand) | Reload: the side button of the hand that holds the gun refills all five shells. |
 | A or Y | Start |
 | B or X | Coin |
 | Left menu button | Open / close the options menu (the game pauses) |

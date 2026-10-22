@@ -19,6 +19,7 @@ Playing
   2. Double-click "Play The Lost World VR.bat".
   3. In the headset:
        Trigger (gun hand) ...... fire (the gun is in the hand chosen in the options: right or left)
+       Grip (gun hand) ......... reload (the side button of the hand that holds the gun)
        A or Y .................. Start
        B or X .................. Coin
        Left menu button ........ options menu (the game pauses; point and pull the trigger)
