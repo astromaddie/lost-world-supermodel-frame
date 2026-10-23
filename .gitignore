@@ -357,6 +357,9 @@ bin64/
 bin32/
 obj/
 obj64/
+binframe/
+objframe/
+dist/
 obj32/
 Frameworks/
 Src/CPU/68K/Musashi/m68kopac.c

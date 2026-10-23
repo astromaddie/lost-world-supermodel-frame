@@ -76,6 +76,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <stdexcept>
 #include <GL/glew.h>
 
 #ifdef SUPERMODEL_WIN32
@@ -2797,6 +2798,12 @@ static void Help(void)
   puts("  -vsync                  Lock to vertical refresh rate [Default]");
   puts("  -no-vsync               Do not lock to vertical refresh rate");
   puts("  -vr                     Play in a VR headset (OpenXR: Virtual Desktop, Quest Link, SteamVR)");
+#ifdef SUPERMODEL_FRAME
+  puts("  -no-vr                  Disable VR, overriding a saved VR=true setting");
+  puts("  -vr-probe               Draw distinct colours to both OpenXR eyes, without a ROM");
+  puts("  -vr-probe-seconds=<n>   Probe duration in seconds (1-300; default 30)");
+  puts("  -vr-probe-force-render  Probe-only diagnostic when the runtime says shouldRender=false");
+#endif
   puts("  -true-hz                Use true Model 3 refresh rate of 57.524 Hz");
   puts("  -show-fps               Display frame rate in window title bar");
   puts("  -crosshairs=<n>         Crosshairs configuration for gun games:");
@@ -2864,6 +2871,67 @@ static void Help(void)
   puts("");
 }
 
+#ifdef SUPERMODEL_FRAME
+static int RunVRColorProbe(unsigned seconds, bool forceRender)
+{
+  DesktopXR xr;
+  DesktopXR::Config config;
+  config.colorProbe = true;
+  config.forceProbeRender = forceRender;
+  config.threadedWait = false;
+  config.refreshHz = 0.0f;
+
+  if (!xr.Init(config))
+    return 1;
+
+  const uint64_t start = SDL_GetPerformanceCounter();
+  const uint64_t timeout = SDL_GetPerformanceFrequency() * seconds;
+  bool quit = false;
+  while (!quit && SDL_GetPerformanceCounter() - start < timeout)
+  {
+    SDL_Event event;
+    while (SDL_PollEvent(&event))
+      if (event.type == SDL_QUIT || (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_ESCAPE))
+        quit = true;
+    if (quit || !xr.PollEvents())
+      break;
+
+    if (!xr.IsSessionRunning())
+    {
+      SDL_Delay(10);
+      continue;
+    }
+
+    if (!xr.DrawColorProbeFrame())
+    {
+      ErrorLog("VR probe: OpenXR or graphics frame operation failed.");
+      break;
+    }
+  }
+
+  const DesktopXR::ProbeStats& stats = xr.ColorProbeStats();
+  InfoLog("VR probe summary: xrEndFrame calls=%llu, failures=%llu, shouldRender=true:%llu false:%llu, forcedFrames=%llu, syntheticViewFrames=%llu, stereo projection frames=%llu, xrWaitFrameFailures=%llu, invalidStereoViewCounts=%llu, xrErrors=%llu, graphicsErrors=%llu, colorMismatches=%llu",
+          (unsigned long long)stats.frames, (unsigned long long)stats.endFrameFailures,
+          (unsigned long long)stats.shouldRender, (unsigned long long)stats.shouldNotRender,
+          (unsigned long long)stats.forcedFrames, (unsigned long long)stats.syntheticViewFrames,
+          (unsigned long long)stats.projectionLayers, (unsigned long long)stats.waitFrameFailures,
+          (unsigned long long)stats.viewCountFailures, (unsigned long long)stats.xrErrors,
+          (unsigned long long)stats.graphicsErrors, (unsigned long long)stats.colorMismatches);
+  InfoLog("VR probe eye samples: left=%s (%u,%u,%u,%u), right=%s (%u,%u,%u,%u)",
+          stats.eyeSampled[0] ? "captured" : "missing", stats.eyeSamples[0][0], stats.eyeSamples[0][1],
+          stats.eyeSamples[0][2], stats.eyeSamples[0][3], stats.eyeSampled[1] ? "captured" : "missing",
+          stats.eyeSamples[1][0], stats.eyeSamples[1][1], stats.eyeSamples[1][2], stats.eyeSamples[1][3]);
+  if (stats.projectionLayers == 0)
+  {
+    ErrorLog("VR probe: no stereo projection frame was submitted; this run cannot establish OpenXR eye-colour output.");
+    return 1;
+  }
+  return stats.endFrameFailures == 0 && stats.waitFrameFailures == 0 && stats.viewCountFailures == 0 &&
+         stats.xrErrors == 0 && stats.graphicsErrors == 0 && stats.colorMismatches == 0 &&
+         stats.eyeSampled[0] && stats.eyeSampled[1] ? 0 : 1;
+}
+#endif
+
 struct ParsedCommandLine
 {
   Util::Config::Node config = Util::Config::Node("CommandLine");
@@ -2874,6 +2942,11 @@ struct ParsedCommandLine
   bool print_gl_info = false;
   bool config_inputs = false;
   bool print_inputs = false;
+#ifdef SUPERMODEL_FRAME
+  bool vr_probe = false;
+  bool vr_probe_force_render = false;
+  unsigned vr_probe_seconds = 30;
+#endif
   bool disable_debugger = false;
   bool enter_debugger = false;
 #ifdef DEBUG
@@ -2935,6 +3008,9 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     { "-vsync",               { "VSync",            true } },
     { "-no-vsync",            { "VSync",            false } },
     { "-vr",                  { "VR",               true } },
+#ifdef SUPERMODEL_FRAME
+    { "-no-vr",               { "VR",               false } },
+#endif
     { "-show-fps",            { "ShowFrameRate",    true } },
     { "-no-fps",              { "ShowFrameRate",    false } },
     { "-new3d",               { "New3DEngine",      true } },
@@ -3006,6 +3082,40 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
       // Fell through -- handle special cases
       if (arg == "-?" || arg == "-h" || arg == "-help" || arg == "--help")
         cmd_line.print_help = true;
+#ifdef SUPERMODEL_FRAME
+      else if (arg == "-vr-probe")
+      {
+        cmd_line.vr_probe = true;
+        cmd_line.config.Set("VR", true);
+      }
+      else if (arg == "-vr-probe-force-render")
+        cmd_line.vr_probe_force_render = true;
+      else if (arg == "-vr-probe-seconds" || arg.find("-vr-probe-seconds=") == 0)
+      {
+        const size_t equals = arg.find('=');
+        if (equals == std::string::npos || equals + 1 == arg.size())
+        {
+          ErrorLog("'-vr-probe-seconds' requires an integer from 1 to 300.");
+          cmd_line.error = true;
+        }
+        else
+        {
+          try
+          {
+            size_t consumed = 0;
+            const int value = std::stoi(arg.substr(equals + 1), &consumed);
+            if (consumed != arg.size() - equals - 1 || value < 1 || value > 300)
+              throw std::out_of_range("probe duration");
+            cmd_line.vr_probe_seconds = (unsigned)value;
+          }
+          catch (...)
+          {
+            ErrorLog("'-vr-probe-seconds' requires an integer from 1 to 300.");
+            cmd_line.error = true;
+          }
+        }
+      }
+#endif
       else if (arg == "-print-games")
         cmd_line.print_games = true;
       else if (arg == "-res" || arg.find("-res=") == 0)
@@ -3160,6 +3270,12 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     else
       cmd_line.rom_files.emplace_back(arg);
   }
+#ifdef SUPERMODEL_FRAME
+  if (cmd_line.vr_probe_force_render && !cmd_line.vr_probe) {
+    ErrorLog("'-vr-probe-force-render' requires '-vr-probe'.");
+    cmd_line.error = true;
+  }
+#endif
   return cmd_line;
 }
 
@@ -3239,7 +3355,11 @@ int main(int argc, char **argv)
 #endif
   bool print_games = cmd_line.print_games;
   bool rom_specified = !cmd_line.rom_files.empty();
-  if (!rom_specified && !print_games && !cmd_line.config_inputs && !cmd_line.print_inputs)
+  if (!rom_specified && !print_games && !cmd_line.config_inputs && !cmd_line.print_inputs
+#ifdef SUPERMODEL_FRAME
+      && !cmd_line.vr_probe
+#endif
+      )
   {
     ErrorLog("No ROM file specified.");
     return 0;
@@ -3283,8 +3403,10 @@ int main(int argc, char **argv)
     return 1;
   }
 
-  // Flag as DPI-aware, otherwise the window content might be scaled by some graphics drivers
+  // This SDL hint only exists on Windows; it is irrelevant to the Linux/macOS paths.
+#ifdef SUPERMODEL_WIN32
   SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "system");
+#endif
 
   // Begin initializing various subsystems...
   int exitCode = 0;
@@ -3306,11 +3428,27 @@ int main(int argc, char **argv)
   // Create a window
   xRes = 496;
   yRes = 384;
+#ifdef SUPERMODEL_FRAME
+  if (cmd_line.vr_probe)
+  {
+    s_runtime_config.Set("New3DEngine", true);
+    s_runtime_config.Set("QuadRendering", false);
+    s_runtime_config.Set("VSync", false);
+  }
+#endif
   if (Result::OKAY != CreateGLScreen(s_runtime_config["New3DEngine"].ValueAs<bool>(), s_runtime_config["QuadRendering"].ValueAs<bool>(),"Supermodel", false, &xOffset, &yOffset, &xRes, &yRes, &totalXRes, &totalYRes, false, false))
   {
     exitCode = 1;
     goto Exit;
   }
+
+#ifdef SUPERMODEL_FRAME
+  if (cmd_line.vr_probe)
+  {
+    exitCode = RunVRColorProbe(cmd_line.vr_probe_seconds, cmd_line.vr_probe_force_render);
+    goto Exit;
+  }
+#endif
 
   // Create Crosshair
   s_crosshair = new CCrosshair(s_runtime_config);

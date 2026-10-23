@@ -84,6 +84,10 @@ public:
     int   cinemaDepth        = 2;      // 3D in cinema mode: 0 off (flat), 1 shallow, 2 full
     int   cinemaBezel        = 1;      // cinema screen in a recessed frame whose inner walls reflect the picture: 0 off, 1 on
     int   cinemaGlow         = 1;      // light from the picture spilling around the cinema screen: 0 off, 1 subtle, 2 strong
+#ifdef SUPERMODEL_FRAME
+    bool  colorProbe         = false;  // create only the OpenXR eye swapchains; no game-side assets/actions
+    bool  forceProbeRender   = false;  // probe-only off-head diagnostic; never changes gameplay rendering
+#endif
   };
 
   ~DesktopXR();
@@ -171,6 +175,27 @@ public:
 
   int EyeWidth()  const { return m_eyes[0].width; }
   int EyeHeight() const { return m_eyes[0].height; }
+#ifdef SUPERMODEL_FRAME
+  struct ProbeStats
+  {
+    uint64_t frames = 0;
+    uint64_t shouldRender = 0;
+    uint64_t shouldNotRender = 0;
+    uint64_t forcedFrames = 0;
+    uint64_t syntheticViewFrames = 0;
+    uint64_t projectionLayers = 0;
+    uint64_t endFrameFailures = 0;
+    uint64_t waitFrameFailures = 0;
+    uint64_t viewCountFailures = 0;
+    uint64_t xrErrors = 0;
+    uint64_t graphicsErrors = 0;
+    uint64_t colorMismatches = 0;
+    uint8_t eyeSamples[2][4] = {{0}};
+    bool eyeSampled[2] = {false, false};
+  };
+  bool DrawColorProbeFrame();
+  const ProbeStats& ColorProbeStats() const { return m_probeStats; }
+#endif
 
 private:
   struct Swapchain
@@ -273,6 +298,10 @@ private:
   GLuint m_hudTopTex = 0;
   bool   m_hudPointers = false;
   bool   m_hideLetterbox = true;
+#ifdef SUPERMODEL_FRAME
+  ProbeStats m_probeStats;
+  bool m_probeColorsLogged = false;
+#endif
   New3D::VRScreenInfo m_screen;
   bool   m_hudOnHead = false;   // VRHudLock 2: current choice, switched after a short steady period
   int    m_hudSwitchFrames = 0;

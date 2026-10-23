@@ -1,0 +1,6 @@
+# Native aarch64 Steam Frame build. The shared Unix rules remain the source of
+# truth, while a distinct object/output tree prevents flag contamination of PC builds.
+override SUPERMODEL_FRAME = 1
+BITS = frame
+
+include Makefiles/Makefile.UNIX

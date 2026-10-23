@@ -66,6 +66,11 @@ SDL2_CFLAGS = `sdl2-config --cflags`
 SDL2_LIBS = `sdl2-config --libs`
 SDL2_LIBS += -lSDL2_net
 
+# The Frame dependency image mixes SDL2 from /usr/local with distro SDL2_net headers.
+ifeq ($(SUPERMODEL_FRAME),1)
+SDL2_CFLAGS += -I/usr/include/SDL2
+endif
+
 #
 #	UNIX-specific
 #
@@ -83,6 +88,12 @@ PLATFORM_SRC_FILES = \
 	Src/OSD/Unix/FileSystemPath.cpp
 
 include Makefiles/Rules.inc
+
+# Steam Frame builds use the same Linux source path, with only target-specific
+# floating-point and char defaults enabled by Makefile.Frame.
+ifeq ($(SUPERMODEL_FRAME),1)
+SUPERMODEL_BUILD_FLAGS += -DSUPERMODEL_FRAME -fsigned-char -ffp-contract=off
+endif
 
 clean:
 	$(SILENT)echo Cleaning up \"$(BIN_DIR)\" and \"$(OBJ_DIR)\"...

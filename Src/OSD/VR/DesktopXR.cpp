@@ -264,6 +264,10 @@ bool DesktopXR::Check(XrResult r, const char* what)
 {
   if (XR_SUCCEEDED(r))
     return true;
+#ifdef SUPERMODEL_FRAME
+  if (m_config.colorProbe)
+    ++m_probeStats.xrErrors;
+#endif
   if (r == XR_ERROR_INSTANCE_LOST || r == XR_ERROR_SESSION_LOST)
   {
     // The VR runtime went away (headset disconnected, VR app closed): keep playing in the
@@ -309,8 +313,15 @@ bool DesktopXR::LoadLoader()
 bool DesktopXR::Init(const Config& config)
 {
   m_config = config;
-  if (!LoadLoader() || !CreateInstance() || !CreateSession() || !CreateActions() || !CreateShaders())
+  if (!LoadLoader() || !CreateInstance() || !CreateSession())
     return false;
+#ifdef SUPERMODEL_FRAME
+  if (!m_config.colorProbe && (!CreateActions() || !CreateShaders()))
+    return false;
+#else
+  if (!CreateActions() || !CreateShaders())
+    return false;
+#endif
 
   uint32_t viewCount = 0;
   xrEnumerateViewConfigurationViews(m_instance, m_systemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &viewCount, nullptr);
@@ -331,14 +342,28 @@ bool DesktopXR::Init(const Config& config)
     if (!CreateSwapchain(m_eyes[eye], w, h))
       return false;
   }
-  // HUD at 3x the Model 3 resolution (496x384), so text stays crisp on the quad.
-  if (!CreateSwapchain(m_hud, 496 * 3, 384 * 3))
-    return false;
+#ifdef SUPERMODEL_FRAME
+  if (!m_config.colorProbe)
+#endif
+  {
+    // HUD at 3x the Model 3 resolution (496x384), so text stays crisp on the quad.
+    if (!CreateSwapchain(m_hud, 496 * 3, 384 * 3))
+      return false;
+  }
 
-  InfoLog("VR: runtime '%s', eyes %dx%d (scale %.2f of %ux%u), HUD %dx%d", m_runtimeName.c_str(),
-          m_eyes[0].width, m_eyes[0].height, scale, views[0].recommendedImageRectWidth,
-          views[0].recommendedImageRectHeight, m_hud.width, m_hud.height);
-  New3D::SetVRFrameTarget(this);
+#ifdef SUPERMODEL_FRAME
+  if (m_config.colorProbe) {
+    InfoLog("VR probe: runtime '%s', eyes %dx%d and %dx%d, OpenGL swapchain format 0x%llx",
+            m_runtimeName.c_str(), m_eyes[0].width, m_eyes[0].height,
+            m_eyes[1].width, m_eyes[1].height, (unsigned long long)m_colorFormat);
+  } else
+#endif
+  {
+    InfoLog("VR: runtime '%s', eyes %dx%d (scale %.2f of %ux%u), HUD %dx%d", m_runtimeName.c_str(),
+            m_eyes[0].width, m_eyes[0].height, scale, views[0].recommendedImageRectWidth,
+            views[0].recommendedImageRectHeight, m_hud.width, m_hud.height);
+    New3D::SetVRFrameTarget(this);
+  }
   return true;
 }
 
@@ -1126,7 +1151,8 @@ void DesktopXR::HandleSessionState(XrSessionState state)
 bool DesktopXR::PollEvents()
 {
   XrEventDataBuffer ev{XR_TYPE_EVENT_DATA_BUFFER};
-  while (xrPollEvent(m_instance, &ev) == XR_SUCCESS) {
+  XrResult pollResult;
+  while ((pollResult = xrPollEvent(m_instance, &ev)) == XR_SUCCESS) {
     switch (ev.type) {
       case XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED:
         HandleSessionState(reinterpret_cast<XrEventDataSessionStateChanged*>(&ev)->state);
@@ -1142,6 +1168,12 @@ bool DesktopXR::PollEvents()
     }
     ev = {XR_TYPE_EVENT_DATA_BUFFER};
   }
+#ifdef SUPERMODEL_FRAME
+  if (m_config.colorProbe && XR_FAILED(pollResult) && pollResult != XR_EVENT_UNAVAILABLE) {
+    Check(pollResult, "xrPollEvent");
+    return false;
+  }
+#endif
   return !m_exitRequested;
 }
 
@@ -1354,6 +1386,13 @@ void DesktopXR::NotifyEvent()
 
 bool DesktopXR::BeginFrame()
 {
+#ifdef SUPERMODEL_FRAME
+  const bool probeMode = m_config.colorProbe;
+  const bool forceProbeRender = probeMode && m_config.forceProbeRender;
+#else
+  const bool probeMode = false;
+  const bool forceProbeRender = false;
+#endif
   m_frameBegun = false;
   m_viewsValid = false;
   m_eyeDrawn[0] = m_eyeDrawn[1] = false;
@@ -1372,17 +1411,33 @@ bool DesktopXR::BeginFrame()
       return false;
     m_waitRequested = false;
     m_waitDone = false;
-    if (!Check(m_waitResult, "xrWaitFrame"))
+    if (!Check(m_waitResult, "xrWaitFrame")) {
+#ifdef SUPERMODEL_FRAME
+      if (probeMode)
+        ++m_probeStats.waitFrameFailures;
+#endif
       return false;
+    }
     m_frameState = m_waitState;
   } else {
     XrFrameWaitInfo wi{XR_TYPE_FRAME_WAIT_INFO};
-    if (!Check(xrWaitFrame(m_session, &wi, &m_frameState), "xrWaitFrame"))
+    if (!Check(xrWaitFrame(m_session, &wi, &m_frameState), "xrWaitFrame")) {
+#ifdef SUPERMODEL_FRAME
+      if (probeMode)
+        ++m_probeStats.waitFrameFailures;
+#endif
       return false;
+    }
   }
   XrFrameBeginInfo bi{XR_TYPE_FRAME_BEGIN_INFO};
-  if (XR_FAILED(xrBeginFrame(m_session, &bi)))
+  const XrResult beginResult = xrBeginFrame(m_session, &bi);
+  if (XR_FAILED(beginResult)) {
+#ifdef SUPERMODEL_FRAME
+    if (m_config.colorProbe)
+      Check(beginResult, "xrBeginFrame");
+#endif
     return false;
+  }
   m_frameBegun = true;
   if (m_frameState.predictedDisplayPeriod > 0)
     m_displayPeriod = (double)m_frameState.predictedDisplayPeriod * 1e-9;
@@ -1396,7 +1451,12 @@ bool DesktopXR::BeginFrame()
     // New origin: the head's position, rotated only around the vertical axis (keep the
     // floor level), so the game screen is straight ahead.
     XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
-    if (XR_SUCCEEDED(xrLocateSpace(m_viewSpace, m_stageSpace, m_frameState.predictedDisplayTime, &head)) &&
+    const XrResult locateHeadResult = xrLocateSpace(m_viewSpace, m_stageSpace, m_frameState.predictedDisplayTime, &head);
+#ifdef SUPERMODEL_FRAME
+    if (probeMode && XR_FAILED(locateHeadResult))
+      Check(locateHeadResult, "xrLocateSpace for recenter");
+#endif
+    if (XR_SUCCEEDED(locateHeadResult) &&
         (head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
       const XrVector3f f = Rotate(head.pose.orientation, {0.f, 0.f, -1.f});
       const float yaw = std::atan2(-f.x, -f.z);
@@ -1409,8 +1469,11 @@ bool DesktopXR::BeginFrame()
     }
   }
 
-  SyncInput();
-  if (!m_frameState.shouldRender)
+#ifdef SUPERMODEL_FRAME
+  if (!m_config.colorProbe)
+#endif
+    SyncInput();
+  if (!m_frameState.shouldRender && !forceProbeRender)
     return false;
 
   XrViewLocateInfo li{XR_TYPE_VIEW_LOCATE_INFO};
@@ -1421,21 +1484,64 @@ bool DesktopXR::BeginFrame()
   uint32_t count = 0;
   m_views[0] = {XR_TYPE_VIEW};
   m_views[1] = {XR_TYPE_VIEW};
-  if (XR_FAILED(xrLocateViews(m_session, &li, &vs, 2, &count, m_views)) || count != 2)
+  const XrResult locateResult = xrLocateViews(m_session, &li, &vs, 2, &count, m_views);
+  if (XR_FAILED(locateResult)) {
+#ifdef SUPERMODEL_FRAME
+    if (m_config.colorProbe)
+      Check(locateResult, "xrLocateViews");
+#endif
     return false;
-  m_viewsValid = (vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) != 0;
+  }
+  if (count != 2) {
+#ifdef SUPERMODEL_FRAME
+    if (m_config.colorProbe) {
+      ++m_probeStats.viewCountFailures;
+      Fail("xrLocateViews did not return exactly two stereo views");
+    }
+#endif
+    return false;
+  }
+  const bool orientationValid = (vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) != 0;
+  const bool positionValid = (vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0;
+  m_viewsValid = orientationValid;
 
   XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
-  if (XR_SUCCEEDED(xrLocateSpace(m_viewSpace, m_localSpace, m_frameState.predictedDisplayTime, &head)) &&
+  const XrResult locateHeadResult = xrLocateSpace(m_viewSpace, m_localSpace, m_frameState.predictedDisplayTime, &head);
+#ifdef SUPERMODEL_FRAME
+  if (probeMode && XR_FAILED(locateHeadResult))
+    Check(locateHeadResult, "xrLocateSpace for head pose");
+#endif
+  if (XR_SUCCEEDED(locateHeadResult) &&
       (head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT))
     m_headPose = head.pose;
 
-  if (m_viewsValid) {
+  if (m_viewsValid || (probeMode && forceProbeRender && positionValid)) {
     const XrVector3f a = m_views[0].pose.position, b = m_views[1].pose.position;
     const float d = std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z));
     if (d > 0.04f && d < 0.09f)
       m_ipd = d;
   }
+#ifdef SUPERMODEL_FRAME
+  if (m_config.colorProbe && forceProbeRender && !(orientationValid && positionValid)) {
+    // The runtime remains authoritative whenever it reports a complete view pose. In standby,
+    // use a symmetric probe-only pose in the existing local space; preserve runtime IPD above
+    // when position data was valid. Never use the unrelated VIEW-space head anchor here.
+    const float halfIpd = m_ipd * 0.5f;
+    const XrQuaternionf identity{0.f, 0.f, 0.f, 1.f};
+    for (int eye = 0; eye < 2; ++eye) {
+      m_views[eye].pose.orientation = identity;
+      m_views[eye].pose.position = {eye == 0 ? -halfIpd : halfIpd, 0.f, 0.f};
+      const XrFovf& f = m_views[eye].fov;
+      if (!std::isfinite(f.angleLeft) || !std::isfinite(f.angleRight) ||
+          !std::isfinite(f.angleUp) || !std::isfinite(f.angleDown) ||
+          f.angleLeft >= 0.f || f.angleRight <= 0.f || f.angleUp <= 0.f || f.angleDown >= 0.f) {
+        m_views[eye].fov = {-0.785398163f, 0.785398163f, 0.785398163f, -0.785398163f};
+      }
+    }
+    m_viewsValid = true;
+    ++m_probeStats.syntheticViewFrames;
+  }
+#endif
   UpdateComfort();
   return m_viewsValid;
 }
@@ -2040,6 +2146,11 @@ void DesktopXR::EndFrame()
 {
   if (!m_frameBegun)
     return;
+#ifdef SUPERMODEL_FRAME
+  const bool forceProbeRender = m_config.colorProbe && m_config.forceProbeRender;
+#else
+  const bool forceProbeRender = false;
+#endif
 
   for (auto& e : m_eyes)
     ReleaseImage(e);
@@ -2052,7 +2163,8 @@ void DesktopXR::EndFrame()
   const XrCompositionLayerBaseHeader* layers[2];
   uint32_t layerCount = 0;
 
-  if (m_frameState.shouldRender && m_viewsValid && m_eyeDrawn[0] && m_eyeDrawn[1]) {
+  const bool renderAllowed = m_frameState.shouldRender || forceProbeRender;
+  if (renderAllowed && m_viewsValid && m_eyeDrawn[0] && m_eyeDrawn[1]) {
     for (int eye = 0; eye < 2; eye++) {
       projViews[eye].pose = m_views[eye].pose;
       projViews[eye].fov = m_views[eye].fov;
@@ -2066,7 +2178,7 @@ void DesktopXR::EndFrame()
     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj);
   }
 
-  if (m_frameState.shouldRender && m_hud.releasedOnce && !m_config.hudInEye) {
+  if (renderAllowed && m_hud.releasedOnce && !m_config.hudInEye) {
     // Exactly over the game's original screen frustum, so 2D overlays line up with the 3D world.
     const float d = m_config.hudDistance;
     quad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
@@ -2085,7 +2197,30 @@ void DesktopXR::EndFrame()
   ei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
   ei.layerCount = layerCount;
   ei.layers = layers;
+#ifdef SUPERMODEL_FRAME
+  const bool endFrameOk = Check(xrEndFrame(m_session, &ei), "xrEndFrame");
+  if (m_config.colorProbe) {
+    ++m_probeStats.frames;
+    if (m_frameState.shouldRender)
+      ++m_probeStats.shouldRender;
+    else
+      ++m_probeStats.shouldNotRender;
+    if (!m_frameState.shouldRender && forceProbeRender)
+      ++m_probeStats.forcedFrames;
+    if (layerCount > 0 && m_eyeDrawn[0] && m_eyeDrawn[1])
+      ++m_probeStats.projectionLayers;
+    if (!endFrameOk)
+      ++m_probeStats.endFrameFailures;
+    if (layerCount > 0 && m_probeStats.projectionLayers == 1) {
+      InfoLog("VR probe: xrEndFrame %s, shouldRender=%s, forceRender=%s, submitted layers=%u (stereo projection)",
+              endFrameOk ? "succeeded" : "failed",
+              m_frameState.shouldRender ? "true" : "false",
+              forceProbeRender ? "true" : "false", layerCount);
+    }
+  }
+#else
   Check(xrEndFrame(m_session, &ei), "xrEndFrame");
+#endif
   m_frameBegun = false;
 }
 
@@ -2312,13 +2447,28 @@ bool DesktopXR::AcquireImage(Swapchain& sc)
     return true;
   XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
   uint32_t index = 0;
-  if (XR_FAILED(xrAcquireSwapchainImage(sc.handle, &ai, &index)))
+  const XrResult acquireResult = xrAcquireSwapchainImage(sc.handle, &ai, &index);
+  if (XR_FAILED(acquireResult)) {
+#ifdef SUPERMODEL_FRAME
+    if (m_config.colorProbe)
+      Check(acquireResult, "xrAcquireSwapchainImage");
+#endif
     return false;
+  }
   XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
   wi.timeout = XR_INFINITE_DURATION;
-  if (XR_FAILED(xrWaitSwapchainImage(sc.handle, &wi))) {
+  const XrResult waitResult = xrWaitSwapchainImage(sc.handle, &wi);
+  if (XR_FAILED(waitResult)) {
+#ifdef SUPERMODEL_FRAME
+    if (m_config.colorProbe)
+      Check(waitResult, "xrWaitSwapchainImage");
+#endif
     XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-    xrReleaseSwapchainImage(sc.handle, &ri);
+    const XrResult releaseResult = xrReleaseSwapchainImage(sc.handle, &ri);
+#ifdef SUPERMODEL_FRAME
+    if (m_config.colorProbe && XR_FAILED(releaseResult))
+      Check(releaseResult, "xrReleaseSwapchainImage after wait failure");
+#endif
     return false;
   }
   sc.acquired = index;
@@ -2331,7 +2481,11 @@ void DesktopXR::ReleaseImage(Swapchain& sc)
     return;
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-  xrReleaseSwapchainImage(sc.handle, &ri);
+  const XrResult releaseResult = xrReleaseSwapchainImage(sc.handle, &ri);
+#ifdef SUPERMODEL_FRAME
+  if (m_config.colorProbe && XR_FAILED(releaseResult))
+    Check(releaseResult, "xrReleaseSwapchainImage");
+#endif
   sc.acquired = UINT32_MAX;
   sc.releasedOnce = true;
 }
@@ -2366,7 +2520,13 @@ void DesktopXR::ComputeEye(int eye, New3D::VREye& out) const
 
 bool DesktopXR::BeginEye(int eye, New3D::VREye& outEye)
 {
-  if (eye < 0 || eye > 1 || m_suppressEyes || !m_frameBegun || !m_frameState.shouldRender || !m_viewsValid || m_eyeDrawn[eye])
+#ifdef SUPERMODEL_FRAME
+  const bool forceProbeRender = m_config.colorProbe && m_config.forceProbeRender;
+#else
+  const bool forceProbeRender = false;
+#endif
+  if (eye < 0 || eye > 1 || m_suppressEyes || !m_frameBegun ||
+      (!m_frameState.shouldRender && !forceProbeRender) || !m_viewsValid || m_eyeDrawn[eye])
     return false;
   Swapchain& sc = m_eyes[eye];
   if (!AcquireImage(sc))
@@ -2404,22 +2564,98 @@ void DesktopXR::EndEye(int eye)
   if (eye < 0 || eye > 1)
     return;
   if (m_eyes[eye].acquired != UINT32_MAX) {
-    m_gunDepthValid = false;
-    if (m_config.cinema) {
-      DrawCinemaInEye(m_curEye[eye]);
-      DrawHandGuns(m_curEye[eye]);
-    } else {
-      if (m_config.hudInEye)
-        DrawHudInEye(m_curEye[eye]);
-      DrawHandGuns(m_curEye[eye]);
-      DrawVignette(m_curEye[eye]);
+#ifdef SUPERMODEL_FRAME
+    if (!m_config.colorProbe)
+#endif
+    {
+      m_gunDepthValid = false;
+      if (m_config.cinema) {
+        DrawCinemaInEye(m_curEye[eye]);
+        DrawHandGuns(m_curEye[eye]);
+      } else {
+        if (m_config.hudInEye)
+          DrawHudInEye(m_curEye[eye]);
+        DrawHandGuns(m_curEye[eye]);
+        DrawVignette(m_curEye[eye]);
+      }
+      if (m_menuOpen && m_menuTex)
+        DrawMenuInEye(m_curEye[eye]);
     }
-    if (m_menuOpen && m_menuTex)
-      DrawMenuInEye(m_curEye[eye]);
   }
   ReleaseImage(m_eyes[eye]);
   m_eyeDrawn[eye] = true;
 }
+
+#ifdef SUPERMODEL_FRAME
+bool DesktopXR::DrawColorProbeFrame()
+{
+  const auto checkGraphicsErrors = [this](const char* operation, int eye) {
+    bool clean = true;
+    GLenum graphicsError = GL_NO_ERROR;
+    while ((graphicsError = glGetError()) != GL_NO_ERROR) {
+      clean = false;
+      ++m_probeStats.graphicsErrors;
+      if (eye >= 0)
+        ErrorLog("VR probe: OpenGL error 0x%x during %s for eye %d", graphicsError, operation, eye);
+      else
+        ErrorLog("VR probe: OpenGL error 0x%x during %s", graphicsError, operation);
+    }
+    return clean;
+  };
+  const bool shouldDraw = BeginFrame();
+  if (shouldDraw) {
+    const GLfloat colors[2][4] = {
+      {0.90f, 0.04f, 0.08f, 1.0f},
+      {0.04f, 0.12f, 0.92f, 1.0f},
+    };
+    for (int eye = 0; eye < 2; ++eye) {
+      New3D::VREye target;
+      if (!BeginEye(eye, target))
+        continue;
+      glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
+      glDisable(GL_FRAMEBUFFER_SRGB);
+      glDisable(GL_SCISSOR_TEST);
+      glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+      glViewport(0, 0, target.width, target.height);
+      glClearColor(colors[eye][0], colors[eye][1], colors[eye][2], colors[eye][3]);
+      glClear(GL_COLOR_BUFFER_BIT);
+      checkGraphicsErrors("eye clear", eye);
+      if (!m_probeStats.eyeSampled[eye]) {
+        GLubyte pixel[4] = {0, 0, 0, 0};
+        glReadPixels(target.width / 2, target.height / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+        if (checkGraphicsErrors("pixel sample", eye)) {
+          std::copy(pixel, pixel + 4, m_probeStats.eyeSamples[eye]);
+          m_probeStats.eyeSampled[eye] = true;
+          for (int channel = 0; channel < 4; ++channel) {
+            const int expected = (int)(colors[eye][channel] * 255.f + 0.5f);
+            if (std::abs((int)pixel[channel] - expected) > 4) {
+              ++m_probeStats.colorMismatches;
+              ErrorLog("VR probe: eye %d sampled RGBA=(%u,%u,%u,%u), expected channel %d near %d",
+                       eye, pixel[0], pixel[1], pixel[2], pixel[3], channel, expected);
+              break;
+            }
+          }
+        }
+      }
+      EndEye(eye);
+    }
+    if (m_eyeDrawn[0] && m_eyeDrawn[1] && !m_probeColorsLogged) {
+      InfoLog("VR probe: sampled center pixels left RGBA=(%u,%u,%u,%u), right RGBA=(%u,%u,%u,%u)",
+              m_probeStats.eyeSamples[0][0], m_probeStats.eyeSamples[0][1],
+              m_probeStats.eyeSamples[0][2], m_probeStats.eyeSamples[0][3],
+              m_probeStats.eyeSamples[1][0], m_probeStats.eyeSamples[1][1],
+              m_probeStats.eyeSamples[1][2], m_probeStats.eyeSamples[1][3]);
+      m_probeColorsLogged = true;
+    }
+  }
+  if (m_frameBegun)
+    EndFrame();
+  checkGraphicsErrors("frame submission", -1);
+  return m_probeStats.endFrameFailures == 0 && m_probeStats.xrErrors == 0 &&
+         m_probeStats.waitFrameFailures == 0 && m_probeStats.viewCountFailures == 0 &&
+         m_probeStats.graphicsErrors == 0 && m_probeStats.colorMismatches == 0;
+}
+#endif
 
 void DesktopXR::DrawEyesIfMissing()
 {
