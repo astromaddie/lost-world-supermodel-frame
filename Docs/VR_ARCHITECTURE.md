@@ -12,7 +12,7 @@ This port reuses the upstream Linux ARM64/OpenGL/OpenXR path on SteamOS. Frame-o
 | Lighting | The New3D VR shader applies each eye camera transform and the existing lighting inputs. |
 | Flat/menu viewports | Small flat viewports use `DrawVRSubViewports`; they are not treated as stereo world geometry. |
 | HUD | Top-layer alpha is derived in the shader; parked/hidden model rules remove letterbox and cutscene sight. |
-| Backdrop | The 4:3 background is mirrored beyond its original horizontal edges. |
+| Backdrop | The 4:3 background is mirrored beyond both axes at infinity, with rotation only; its uploaded texture persists across retained-scene redraws. |
 | Light-gun hit test | The existing flat pass remains authoritative. VR aim uses a one-frame PBO result collected in `CollectLos`. |
 | Menu and gun overlays | Existing OpenXR paths draw them after the game scene; the colour probe bypasses these paths. |
 
@@ -26,6 +26,73 @@ The opt-in `-vr-game-diagnostic` mode requires a ROM and has a finite timeout. I
 
 The ROM-free probe is bounded by `-vr-probe-seconds=1..300` and fails when no projection is submitted, a sampled eye colour is wrong, or an OpenXR/OpenGL operation reports an error. A host build or probe without an active runtime does not establish Frame display output.
 
+## Aim, held gun, and submission
+
+The runtime's `aim/pose` supplies local -Z forward and +Y up. One controller-local
+fine-adjustment quaternion drives both the held model and menu/game rays; there is
+no borrowed grip-axis pitch correction. Head and hands are located at the same
+predicted display time, and rotation-only mode subtracts the same head position
+from the game ray and held model. Frame keeps the configured gun hand when its
+tracking is unavailable and suppresses firing at a stale target. Pointer rendering
+reprojects the stored predicted ray against the current frustum and panel depth/size,
+including its visibility bounds. This keeps the pointer on the barrel axis through
+camera zooms while leaving the emulator's already-consumed input snapshot unchanged.
+
+Lost World's wide calibration and input conversion are paired in code, including
+on installations without the old PC settings file. With wide calibration enabled,
+default X scale/offset are `0.5497 / 0.2162`, and Y are `0.5507 / 0.2155`; explicit
+settings still override them. With calibration disabled, defaults are identity.
+These are the existing PC calibration values, not an independently remeasured
+ROM hit response. `test-controller-aim.cpp` covers production quaternion/ray math,
+rolled hands, screen center/edges, depth, translation modes, and calibration values.
+
+The Game gun slot loads a private `VRGameGun.obj` first. If absent, the Frame Lost
+World build loads `FrameArcadeGun.obj`: the approved 17,108-triangle Namco Arcade
+Gun by Martoscar, CC-BY-4.0. The importer retains topology, normals, scale and
+orientation, samples its TC2 atlas into face materials, and translates its optical
+emitter center onto the OpenXR aim ray. The physical muzzle and ray now share
+local X/Y zero; the optical lens geometry itself is checked by
+`test-arcade-gun.py`. Blue retains the asset's material colors; Red recolors only
+blue plastic. Custom models and saved model/off choices remain supported.
+
+On Frame, every eye is flushed after drawing; all acquired images remain owned
+until one `glFinish` in `EndFrame`, followed by the swapchain releases. This protects
+the GL producer/compositor handoff without serializing each eye separately.
+Retained-scene redraws no longer advance the gameplay/HUD debounce counters.
+Submission correctness, GPU cost, and visible flicker must be checked separately.
+
+### Focused diagnostics
+
+Only `-vr-game-diagnostic` reads these environment controls:
+
+- `SM_FRAME_DIAG_SEQUENCE=1..16`: capture this many qualified display frames.
+- `SM_FRAME_DIAG_HOLD_SCENE=1`: after the first capture, drain pending CPU work and
+  redraw the same scene/textures for the remaining samples.
+- `SM_FRAME_DIAG_HAND_YAW`, `SM_FRAME_DIAG_HAND_PITCH`, `SM_FRAME_DIAG_HAND_ROLL`:
+  rotate synthetic hands relative to the head, in degrees. Defaults are zero.
+
+Every sample writes each eye immediately after the backdrop and at final output,
+with an ordinal, source frame, new/redraw flag, pose/ray, gun vertex counts, and
+submission metadata. The first sample reads each unchanged FBO twice and fails
+on disagreement. The default remains one sample. These readbacks force GPU work
+and alter scheduling; they do not establish that ordinary presentation is free of
+flicker. Use the hold control to distinguish retained-state changes from animation.
+
+`SM_FRAME_DIAG_SKIP_GPU_WAIT=1` disables completion only in the color probe or game
+diagnostic. For matched no-readback timing, set the capture frame to `1000000000`
+and a bounded timeout, hold resolution/mirror/refresh/input stimulus constant,
+and compare wait on/off in the same binary. Timeout is the expected exit in that
+case. A color-probe A/B isolates submission from the game's backdrop. Normal
+launches always keep the completion wait, even if that environment key is present.
+
+For eye captures use the existing Steam-launched diagnostic at the selected game
+frame with `SM_FRAME_DIAG_SEQUENCE=8`, first with a live scene, then with
+`SM_FRAME_DIAG_HOLD_SCENE=1`. Repeat at the existing 0/90/180 head yaws and use hand
+yaw/pitch/roll combinations for the visible gun. Inspect paired backdrop/final
+stages, check unchanged-source readbacks, and keep captured correctness runs
+separate from timing and physical controller acceptance. Reduce images to compact
+evidence grids and remove full-resolution development captures after review.
+
 ## Reproduction
 
 The native target builds from the ARM64 `ubuntu:22.04` base image. `Scripts/frame/Dockerfile` installs the pinned Jammy compiler, OpenGL, SDL2, SDL2_net and OpenXR development packages plus host verification tools; it does not depend on another repository's image:
@@ -34,7 +101,7 @@ The native target builds from the ARM64 `ubuntu:22.04` base image. `Scripts/fram
 Scripts/frame/build.sh
 ```
 
-The build uses two jobs, creates separate `objframe/` and `binframe/` outputs, and writes the portable archive under `dist/`. Re-running the packaging step stages and verifies both outputs before replacing the previous generated package. No ROM, NVRAM, custom gun model or menu artwork is included. `run-frame.sh --probe 30 --force-render` runs the bounded ROM-free diagnostic. Normal launch selects `ROMs/lostwsga.zip` in the persistent data tree or accepts a ROM path explicitly, resolved against the launcher's caller directory. `--flat` provides the same persistent-data launcher with the Frame-only `-no-vr` config override.
+The build uses two jobs, creates separate `objframe/` and `binframe/` outputs, and writes the portable archive under `dist/`. Re-running the packaging step stages and verifies both outputs before replacing the previous generated package. No ROM, NVRAM, private gun model or menu artwork is included. The independently created CC-BY-4.0 Namco Arcade Gun by Martoscar is included with its attribution and conversion manifest. `run-frame.sh --probe 30 --force-render` runs the bounded ROM-free diagnostic. Normal launch selects `ROMs/lostwsga.zip` in the persistent data tree or accepts a ROM path explicitly, resolved against the launcher's caller directory. `--flat` provides the same persistent-data launcher with the Frame-only `-no-vr` config override.
 
 ## Evidence scope
 
@@ -44,7 +111,7 @@ The build uses two jobs, creates separate `objframe/` and `binframe/` outputs, a
 | Host behavior | Full ARM64 build, command-line checks, Xvfb OpenGL information and launcher tests. |
 | Initial OpenXR probe | On the Frame with the installed baseline build: 1664x1664 per eye, `GL_SRGB8_ALPHA8`, 847 submitted projection frames (1 `shouldRender=true`, 846 explicitly forced), left sample `(230,10,20,255)`, right `(10,31,235,255)`, and zero XR/OpenGL errors. The probe confirms the OpenXR eye path on that build. |
 | Initial flat game | On the Frame with the installed baseline build, `-no-vr -no-throttle -no-vsync` ran for 32 seconds with 16 one-second title samples from 71.873 to 72.155 FPS, at the 72 Hz display limit; shutdown saved NVRAM normally. A separately paced run sampled about 60 FPS. |
-| Current stereo game | Steam launches on the Frame captured both production eye FBOs at yaw 0, 90 and 180 degrees, each at game frame 2267 with 181 main-view models and 2160x2160 eyes. The paired images show upright scenery, distinct eye views and world geometry changing with the requested yaw. All three runs submitted stereo projection layers, returned success and recorded zero XR/OpenGL errors. |
+| Baseline stereo game | Steam launches on the Frame captured both production eye FBOs at yaw 0, 90 and 180 degrees, each at game frame 2267 with 181 main-view models and 2160x2160 eyes. The paired images show upright scenery, distinct eye views and world geometry changing with the requested yaw. All three runs submitted stereo projection layers, returned success and recorded zero XR/OpenGL errors. |
 
 The three stereo runs used fixed synthetic head/hand poses and explicitly forced rendering during standby. Their projection-frame counts were 4529, 4535 and 4530 respectively; each included one original `shouldRender=true` frame. This verifies the native game/render/submission path. Physical aiming, control ergonomics and optical stereo require separate interactive checks.
 
@@ -56,4 +123,4 @@ The rebuilt default profile was then launched with the original configuration re
 
 On Mesa/Zink, querying freshly generated GPU timer-query names produced four startup `GL_INVALID_OPERATION` errors. The timer now polls only slots containing a previously ended query and consumes each available result before reuse. The same diagnostic runs with `MESA_DEBUG=context` confirmed the startup errors were eliminated.
 
-No new menu layout or art is introduced. The existing upstream PC input and display behavior remains available outside the Frame build.
+No new menu layout is introduced. The existing upstream PC input and display behavior remains available outside the Frame build.

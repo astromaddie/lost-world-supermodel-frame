@@ -186,7 +186,12 @@ public:
   bool LoadCustomGun(const std::string& objPath, int slot = 1);   // false = no file / nothing usable in it
   // The game's gun as a model file (Assets/VRGameGun.obj), for games whose own gun isn't
   // available from the ROM: chosen with "Game" in the menu, drawn in the colour set below.
-  bool LoadGameGun(const std::string& objPath) { return LoadCustomGun(objPath, 2); }
+  bool LoadGameGun(const std::string& objPath, bool preserveMaterials = false)
+  {
+    if (!LoadCustomGun(objPath, 2)) return false;
+    m_gameFilePreserveMaterials = preserveMaterials;
+    return true;
+  }
   void SetGunColour(int colour) { m_gunColour = colour; }   // game gun from file: 0 blue, 1 red
   bool GameGunFromFile() const;
   bool CustomGunLoaded() const { return !m_customGun.empty() || m_gunCount[1] > 0; }
@@ -214,6 +219,7 @@ public:
   };
   void SetDiagnosticSourceFrame(uint64_t gameFrame) { m_diagnosticSourceFrame = gameFrame; }
   bool DiagnosticCaptured() const { return m_gameDiagStats.captured; }
+  bool HoldDiagnosticScene() const { return m_config.gameDiagnostic && m_diagnosticHoldScene && m_diagnosticSample > 0; }
   const GameDiagnosticStats& DiagnosticStats() const { return m_gameDiagStats; }
   struct ProbeStats
   {
@@ -265,9 +271,9 @@ private:
   void DrawHudInEye(const New3D::VREye& eye);
   void DrawStaticFill(const New3D::VREye& eye, const float panelMvp[16]);
   void DrawTintFill(const New3D::VREye& eye, const float panelMvp[16]);
-  void DrawPointerRings(const float mvp[16], float L, float R, float T, float B);
+  void DrawPointerRings(const float mvp[16], float L, float R, float T, float B, float distance, float scale);
   void CinemaRect(float& L, float& R, float& T, float& B) const;
-  bool PointerHand(int hand) const;
+  bool PointerAim(int hand, float L, float R, float T, float B, float distance, float scale, bool extended, float& u, float& v) const;
   void DrawMenuInEye(const New3D::VREye& eye);
   void DrawVignette(const New3D::VREye& eye);
   void DrawCinemaInEye(const New3D::VREye& eye);
@@ -287,6 +293,14 @@ private:
   void StopWaitThread();
 
   Config m_config;
+#ifdef SUPERMODEL_FRAME
+  bool m_waitForGpu = true;
+  bool m_diagnosticHoldScene = false;
+  unsigned m_diagnosticSamples = 1, m_diagnosticSample = 0;
+  float m_diagnosticHandYaw = 0, m_diagnosticHandPitch = 0, m_diagnosticHandRoll = 0;
+  std::vector<unsigned char> m_diagnosticBackdropPixels[2];
+  bool CaptureDiagnosticEye(int eye, std::vector<unsigned char>& pixels, bool validateObserver);
+#endif
   std::string m_error;
   std::string m_runtimeName;
   void* m_loaderLib = nullptr;
@@ -389,6 +403,7 @@ private:
   std::vector<float> m_customGun;              // pending upload: pos, normal, colour per vertex
   std::vector<float> m_gameGunFile;            // the same for the game's gun from a file (slot 2)
   bool   m_gameGunFileLoaded = false;
+  bool   m_gameFilePreserveMaterials = false;
   int    m_gunColour = 0;                      // game gun from file: 0 blue, 1 red
   GLint  m_uGunTint = -1;
   GLuint m_gunProgram = 0, m_gunVao[3] = {0, 0, 0}, m_gunVbo[3] = {0, 0, 0};   // 0 = game gun (ROM), 1 = custom, 2 = game gun (file)

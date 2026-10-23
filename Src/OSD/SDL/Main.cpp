@@ -112,6 +112,7 @@
 #include "OSD/ConfigFile.h"
 #include "Gui.h"
 #include "OSD/VR/DesktopXR.h"
+#include "OSD/VR/ControllerAim.h"
 #include "OSD/VR/VRMenu.h"
 #include "OSD/VR/VRInput.h"
 
@@ -1116,8 +1117,10 @@ static void ApplyVRInput(DesktopXR &xr)
   // One gun, in the hand chosen in the options (VRGunHand 1 = right, 2 = left)
   s_vrGunHand = s_vrSettings.gunHand == 2 ? 1 : 0;
   int h = s_vrGunHand;
+#ifndef SUPERMODEL_FRAME
   if (!in.aimValid[h] && in.aimValid[1 - h])
     h = 1 - h;
+#endif
   if (in.aimValid[h])
   {
     // The game turns the gun position into its crosshair with its own calibration, which is
@@ -1143,7 +1146,7 @@ static void ApplyVRInput(DesktopXR &xr)
   }
   else
     s_vrDbgButtons = 0;
-  const bool anyTrigger = in.trigger[h] || (s_vrDbgButtons & 4);
+  const bool anyTrigger = (in.aimValid[h] && in.trigger[h]) || (s_vrDbgButtons & 4);
   if (!anyTrigger)
     s_vrHoldTrigger = false;
   g_vrInput.mouseLeft   = anyTrigger && !s_vrHoldTrigger && !s_vrMenuOpen;
@@ -1476,10 +1479,16 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     if (xr)
     {
       SDL_GL_SetSwapInterval(0);   // the headset paces the loop, never the monitor
-      s_vrAimScaleX  = s_runtime_config["VRAimScaleX"].ValueAsDefault<float>(1.0f);
-      s_vrAimOffsetX = s_runtime_config["VRAimOffsetX"].ValueAsDefault<float>(0.0f);
-      s_vrAimScaleY  = s_runtime_config["VRAimScaleY"].ValueAsDefault<float>(1.0f);
-      s_vrAimOffsetY = s_runtime_config["VRAimOffsetY"].ValueAsDefault<float>(0.0f);
+      // The package intentionally carries no user settings file. Pair the game's wide
+      // calibration with its measured input conversion even on a completely fresh install.
+      const auto mapping = ControllerAim::LostWorldMapping(game.name == "lostwsga" &&
+          s_runtime_config["VRGunCalibration"].ValueAsDefault<bool>(true));
+      s_vrAimScaleX  = s_runtime_config["VRAimScaleX"].ValueAsDefault<float>(mapping.scaleX);
+      s_vrAimOffsetX = s_runtime_config["VRAimOffsetX"].ValueAsDefault<float>(mapping.offsetX);
+      s_vrAimScaleY  = s_runtime_config["VRAimScaleY"].ValueAsDefault<float>(mapping.scaleY);
+      s_vrAimOffsetY = s_runtime_config["VRAimOffsetY"].ValueAsDefault<float>(mapping.offsetY);
+      InfoLog("VR: gun input mapping scale=(%.4f,%.4f) offset=(%.4f,%.4f)",
+              s_vrAimScaleX, s_vrAimScaleY, s_vrAimOffsetX, s_vrAimOffsetY);
       g_vrInput.active = true;
       vrNew3D = dynamic_cast<New3D::CNew3D *>(Render3D);
       vrModel3 = dynamic_cast<CModel3 *>(Model3);
@@ -1557,10 +1566,19 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
       if (New3D::g_vrHandModel.address == 0)
       {
         const std::string gunPath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Assets) << "VRGameGun.obj";
-        if (xr->LoadGameGun(gunPath))
+        bool loaded = xr->LoadGameGun(gunPath);
+#ifdef SUPERMODEL_FRAME
+        if (!loaded && game.name == "lostwsga") {
+          const std::string arcadePath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Assets) << "FrameArcadeGun.obj";
+          loaded = xr->LoadGameGun(arcadePath, true);
+          if (loaded)
+            InfoLog("VR: licensed arcade gun loaded from %s", arcadePath.c_str());
+        }
+#endif
+        if (loaded)
         {
           s_vrSettings.gunColours = true;
-          InfoLog("VR: game gun model loaded from %s", gunPath.c_str());
+          InfoLog("VR: game gun model ready (private override or bundled arcade model)");
         }
       }
     }
@@ -1670,11 +1688,16 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     bool vrPaced = false, vrRender = false;
     uint64_t vrWorkStart = SDL_GetPerformanceCounter();
     int vrFramesToRun = 1;
+#ifdef SUPERMODEL_FRAME
+    const bool holdDiagnosticScene = xr && xr->HoldDiagnosticScene();
+#else
+    const bool holdDiagnosticScene = false;
+#endif
     if (xr)
     {
       if (!xr->PollEvents())
         quit = true;
-      if (vrAsync && xr->IsSessionRunning() && !paused && vrStarted)
+      if (vrAsync && xr->IsSessionRunning() && !paused && vrStarted && !holdDiagnosticScene)
       {
         // While the headset paces (xrWaitFrame runs on its own thread), keep the emulator
         // going: collect each finished game frame and start the next one in real time.
@@ -1871,7 +1894,14 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
       quit = true;
 
     // Render if paused (or VR waiting for the headset), otherwise run a frame
-    if (paused || (xr && !vrStarted))
+    if (holdDiagnosticScene)
+    {
+      // Keep the last rendered scene, GPU textures and source-frame identity fixed.
+      // Any already-running CPU frame is drained, but is never rendered/uploaded.
+      VRFinishFrame(vrModel3, vrInFlight);
+      vrFramesToRun = 0;
+    }
+    else if (paused || (xr && !vrStarted))
     {
       VRFinishFrame(vrModel3, vrInFlight);
       Model3->RenderFrame();
@@ -2028,7 +2058,7 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
                     subTex, subUv);
         xr->DrawEyesIfMissing();
       }
-      if (vrAsync && vrPaced && !paused)
+      if (vrAsync && vrPaced && !paused && !holdDiagnosticScene)
         VRPump(vrModel3, vrInFlight, vrOwed, vrHaveNew, vrStatEmu);   // 2nd chance this frame
       const double workMs = 1000.0 * (double)(SDL_GetPerformanceCounter() - vrWorkStart) / (double)s_perfCounterFrequency;
       vrStatWorstMs = (std::max)(vrStatWorstMs, workMs);

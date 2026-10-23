@@ -78,7 +78,11 @@ fi
 
 Scripts/frame/test-launcher.sh "$ROOT/dist/lost-world-supermodel-frame-linux-arm64"
 python3 "$ROOT/Scripts/frame/test-abi.py"
+python3 "$ROOT/Scripts/frame/test-arcade-gun.py" "$PACKAGE/Assets"
 g++ -std=c++17 -Wall -Wextra -Werror "$ROOT/Scripts/frame/test-frame-view-gesture.cpp" \
   -o "$TEST_ROOT/test-frame-view-gesture"
 "$TEST_ROOT/test-frame-view-gesture"
+g++ -std=c++17 -Wall -Wextra -Werror -I "$ROOT/Src/Pkgs" "$ROOT/Scripts/frame/test-controller-aim.cpp" \
+  -o "$TEST_ROOT/test-controller-aim"
+"$TEST_ROOT/test-controller-aim"
 printf '%s\n' 'Frame native verification passed (no active OpenXR runtime expected on builder).'

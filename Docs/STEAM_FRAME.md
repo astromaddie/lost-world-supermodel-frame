@@ -6,6 +6,8 @@ Use a Steam shortcut with Steam Linux Runtime 4 ARM64 for tracked-controller pla
 
 The package contains the emulator, bundled SDL2_net, OpenXR loader and jsoncpp dependencies, their upstream copyright/license notices, public game/music databases, the crosshair assets and the licensed menu font. It contains no ROM, save/NVRAM, local `Supermodel.ini`, private gun model or menu artwork. Add your own `ROMs/lostwsga.zip` under the persistent data directory, or pass a ROM path to the launcher.
 
+The Game gun option includes the Namco Arcade Gun model by Martoscar under CC BY 4.0, with attribution and conversion details in `Assets/FrameArcadeGun-NOTICE.txt` and `FrameArcadeGun.json`. A personal `Assets/VRGameGun.obj` takes precedence, and the Custom option still uses your `VRGunModel.obj`. Lost World's matching wide-range aim calibration defaults are applied automatically even without the old PC configuration file; explicit calibration settings remain respected.
+
 Examples:
 
 ```sh

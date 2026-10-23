@@ -406,3 +406,6 @@ Assets/VRMenuFrame.txt
 # Personal gun models (private, never in the repo)
 Assets/VRGunModel.*
 Assets/VRGameGun.*
+
+# Approved public mesh, distinct from compiler objects and private gun overrides
+!Assets/FrameArcadeGun.obj

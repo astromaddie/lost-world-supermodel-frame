@@ -1,0 +1,47 @@
+{
+  "aim_origin_m": [
+    0,
+    0,
+    0
+  ],
+  "author": "Martoscar",
+  "barrel_direction": [
+    0,
+    0,
+    -1
+  ],
+  "files": {
+    "FrameArcadeGun.mtl": "5b05df1aa9fa03284ebb02c111650b98a8ead86e28c1b05de6ffdc4ccd4a3581",
+    "FrameArcadeGun.obj": "00092161260d13a0b90540b501e86bda42373b4240fd45de8481492de977a155"
+  },
+  "license": "CC-BY-4.0",
+  "license_url": "https://creativecommons.org/licenses/by/4.0/",
+  "materials": 12,
+  "model_translation_m": [
+    -0.0,
+    -0.05406942591071129,
+    0
+  ],
+  "modifications": "TC2 normalized geometry retained; translated bore onto aim ray; atlas baked to per-triangle RGB materials with 8-level color quantization; existing lightweight lighting replaces PBR.",
+  "muzzle_m": [
+    0,
+    0,
+    -0.17375099658966064
+  ],
+  "name": "Namco Arcade Gun",
+  "original_glb_sha256": "989b25eaa2d22a25c424c6bb3d3830eda0a88724099019bf21fe2989d2fe1a02",
+  "original_grip_m": [
+    0,
+    0,
+    0
+  ],
+  "original_muzzle_m": [
+    0.0,
+    0.05406942591071129,
+    -0.17375099658966064
+  ],
+  "source_url": "https://sketchfab.com/3d-models/namco-arcade-gun-15fbd5b9add94a34b5c21746e3dd32be",
+  "tc2_asset_sha256": "4a8231dcc6ba717d61ab5783156c3a0d0367572ddb54537b0b283415da12fab8",
+  "triangles": 17108,
+  "vertices": 13149
+}

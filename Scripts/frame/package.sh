@@ -100,7 +100,7 @@ install -m 0644 Docs/LICENSE.txt "$STAGE/LICENSE.txt"
 for file in Games.xml Music.xml; do
   install -m 0644 "Config/$file" "$STAGE/Config/$file"
 done
-for file in DIR.txt VR-MENU.txt VRMenuFont-OFL.txt VRMenuFont.ttf p1crosshair.bmp p2crosshair.bmp; do
+for file in DIR.txt VR-MENU.txt VRMenuFont-OFL.txt VRMenuFont.ttf p1crosshair.bmp p2crosshair.bmp FrameArcadeGun.obj FrameArcadeGun.mtl FrameArcadeGun.json FrameArcadeGun-NOTICE.txt; do
   install -m 0644 "Assets/$file" "$STAGE/Assets/$file"
 done
 
@@ -216,6 +216,8 @@ expected = {
     "Config/Games.xml", "Config/Music.xml",
     "Assets/DIR.txt", "Assets/VR-MENU.txt", "Assets/VRMenuFont-OFL.txt",
     "Assets/VRMenuFont.ttf", "Assets/p1crosshair.bmp", "Assets/p2crosshair.bmp",
+    "Assets/FrameArcadeGun.obj", "Assets/FrameArcadeGun.mtl",
+    "Assets/FrameArcadeGun.json", "Assets/FrameArcadeGun-NOTICE.txt",
     "THIRD-PARTY-NOTICES/OpenXR-loader-copyright.txt",
     "THIRD-PARTY-NOTICES/jsoncpp-copyright.txt",
     "THIRD-PARTY-NOTICES/SDL2_net-copyright.txt",

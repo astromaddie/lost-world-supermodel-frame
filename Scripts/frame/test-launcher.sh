@@ -32,6 +32,11 @@ grep -Fx -- "$APP/lib:/system-test/lib" "$STUB_ENV_FILE" >/dev/null
 PERSIST=$DATA_HOME/lost-world-supermodel-frame
 cmp "$APP/Config/Games.xml" "$PERSIST/Config/Games.xml"
 cmp "$APP/Assets/VRMenuFont.ttf" "$PERSIST/Assets/VRMenuFont.ttf"
+for asset in FrameArcadeGun.obj FrameArcadeGun.mtl FrameArcadeGun.json FrameArcadeGun-NOTICE.txt; do
+  cmp "$APP/Assets/$asset" "$PERSIST/Assets/$asset"
+done
+printf 'private game gun\n' > "$PERSIST/Assets/VRGameGun.obj"
+printf 'private custom gun\n' > "$PERSIST/Assets/VRGunModel.obj"
 
 printf 'user config\n' > "$PERSIST/Config/Supermodel.ini"
 printf 'user asset\n' > "$PERSIST/Assets/VRMenuFont.ttf"
@@ -78,4 +83,6 @@ grep -Fx -- "$PERSIST/ROMs/lostwsga.zip" "$STUB_ARGS_FILE" >/dev/null
 grep -Fx 'user config' "$PERSIST/Config/Supermodel.ini" >/dev/null
 grep -Fx 'user asset' "$PERSIST/Assets/VRMenuFont.ttf" >/dev/null
 
+grep -Fx 'private game gun' "$PERSIST/Assets/VRGameGun.obj" >/dev/null
+grep -Fx 'private custom gun' "$PERSIST/Assets/VRGunModel.obj" >/dev/null
 printf '%s\n' 'Frame launcher tests passed.'

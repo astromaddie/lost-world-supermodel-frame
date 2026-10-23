@@ -10,6 +10,7 @@
 #endif
 
 #include "DesktopXR.h"
+#include "ControllerAim.h"
 #ifdef SUPERMODEL_FRAME
 #include "OSD/FileSystemPath.h"
 #endif
@@ -333,6 +334,30 @@ bool DesktopXR::LoadLoader()
 bool DesktopXR::Init(const Config& config)
 {
   m_config = config;
+#ifdef SUPERMODEL_FRAME
+  // An explicit diagnostic control; ordinary gameplay always waits for completion.
+  const char* skipWait = std::getenv("SM_FRAME_DIAG_SKIP_GPU_WAIT");
+  m_waitForGpu = !(skipWait && std::strcmp(skipWait, "1") == 0 &&
+                   (m_config.colorProbe || m_config.gameDiagnostic));
+  InfoLog("VR: Frame swapchain GPU completion wait %s", m_waitForGpu ? "on" : "OFF (diagnostic control)");
+  if (m_config.gameDiagnostic) {
+    auto number = [](const char* name, float fallback, float low, float high) {
+      const char* raw = std::getenv(name);
+      if (!raw) return fallback;
+      char* end = nullptr;
+      const float value = std::strtof(raw, &end);
+      return end != raw && *end == 0 && std::isfinite(value) ? std::clamp(value, low, high) : fallback;
+    };
+    const char* hold = std::getenv("SM_FRAME_DIAG_HOLD_SCENE");
+    m_diagnosticHoldScene = hold && std::strcmp(hold, "1") == 0;
+    m_diagnosticSamples = (unsigned)number("SM_FRAME_DIAG_SEQUENCE", 1, 1, 16);
+    m_diagnosticHandYaw = number("SM_FRAME_DIAG_HAND_YAW", 0, -180, 180);
+    m_diagnosticHandPitch = number("SM_FRAME_DIAG_HAND_PITCH", 0, -90, 90);
+    m_diagnosticHandRoll = number("SM_FRAME_DIAG_HAND_ROLL", 0, -180, 180);
+    InfoLog("VR game diagnostic: %u consecutive display samples, hand yaw/pitch/roll=%.1f/%.1f/%.1f; readbacks alter GPU scheduling",
+            m_diagnosticSamples, m_diagnosticHandYaw, m_diagnosticHandPitch, m_diagnosticHandRoll);
+  }
+#endif
   if (!LoadLoader() || !CreateInstance() || !CreateSession())
     return false;
 #ifdef SUPERMODEL_FRAME
@@ -1019,6 +1044,11 @@ void main()
   float wt = max(dot(n, lt) * 0.6 + 0.4, 0.0);  // wrapped: plastic scatters a little
   float ws = max(dot(n, ls) * 0.7 + 0.3, 0.0);
   vec3 col = uTint.a > 0.5 ? uTint.rgb : vCol;
+  if (uTint.a > 1.5) {
+    // Public arcade model: preserve metal/lens details; recolor only blue plastic.
+    bool blue = vCol.b > vCol.r * 1.15 && vCol.b > vCol.g * 1.05;
+    col = blue ? uTint.rgb * max(max(vCol.r, vCol.g), vCol.b) : vCol;
+  }
   vec3 diffuse = col * (vec3(0.18) + 0.55 * wt * wt * vec3(1.0) + 0.70 * ws * ws * sc);
   float ns = max(uSpec.y, 1.0);
   float norm = (ns + 8.0) / 25.0;               // energy-normalised Blinn
@@ -1537,6 +1567,8 @@ bool DesktopXR::BeginFrame()
     m_gameDiagnosticEyeCaptured[0] = m_gameDiagnosticEyeCaptured[1] = false;
     m_gameDiagnosticPixels[0].clear();
     m_gameDiagnosticPixels[1].clear();
+    m_diagnosticBackdropPixels[0].clear();
+    m_diagnosticBackdropPixels[1].clear();
   }
 #endif
 
@@ -1621,7 +1653,15 @@ bool DesktopXR::BeginFrame()
 #ifdef SUPERMODEL_FRAME
   if (!m_config.colorProbe && !m_config.gameDiagnostic)
 #endif
+  {
+    // Input and rotation-only rendering must use this frame's head pose.
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+    const XrSpaceLocationFlags need = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+    if (XR_SUCCEEDED(xrLocateSpace(m_viewSpace, m_localSpace, m_frameState.predictedDisplayTime, &head)) &&
+        (head.locationFlags & need) == need)
+      m_headPose = head.pose;
     SyncInput();
+  }
   if (!FrameRenderAllowed())
     return false;
 
@@ -1670,15 +1710,6 @@ bool DesktopXR::BeginFrame()
   } else
 #endif
   {
-    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
-    const XrResult locateHeadResult = xrLocateSpace(m_viewSpace, m_localSpace, m_frameState.predictedDisplayTime, &head);
-#ifdef SUPERMODEL_FRAME
-    if (probeMode && XR_FAILED(locateHeadResult))
-      Check(locateHeadResult, "xrLocateSpace for head pose");
-#endif
-    if (XR_SUCCEEDED(locateHeadResult) &&
-        (head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT))
-      m_headPose = head.pose;
 
     if (m_viewsValid || (probeMode && forceProbeRender && positionValid)) {
       const XrVector3f a = m_views[0].pose.position, b = m_views[1].pose.position;
@@ -1733,25 +1764,25 @@ void DesktopXR::SetSyntheticDiagnosticPose()
   for (int hand = 0; hand < 2; ++hand) {
     const XrVector3f offset{hand == 0 ? 0.24f : -0.24f, -0.16f, -0.42f};
     const XrVector3f origin = Rotate(rotation, offset);
-    const XrVector3f direction = Rotate(rotation, {0.f, 0.f, -1.f});
     XrPosef pose{};
-    pose.orientation = rotation;
+    const float halfRoll = m_diagnosticHandRoll * 0.008726646259971648f;
+    pose.orientation = ControllerAim::Multiply(ControllerAim::Correct(rotation, m_diagnosticHandYaw, m_diagnosticHandPitch),
+                                               {0, 0, std::sin(halfRoll), std::cos(halfRoll)});
+    pose.orientation = ControllerAim::Correct(pose.orientation, m_config.aimNudgeX, m_config.aimNudgeY);
+    const XrVector3f direction = ControllerAim::Forward(pose.orientation);
     pose.position = origin;
     m_handPose[hand] = pose;
     m_handPoseValid[hand] = true;
     m_input.rayValid[hand] = true;
     m_input.rayOrigin[hand] = origin;
     m_input.rayDir[hand] = direction;
-    if (direction.z < -1e-4f) {
-      const float distance = m_config.hudDistance;
-      const float t = (-distance - origin.z) / direction.z;
-      const float px = (origin.x + t * direction.x) / distance;
-      const float py = (origin.y + t * direction.y) / distance;
+    float u, v;
+    if (ControllerAim::Project(origin, direction, m_config.hudDistance, 1.f,
+                               m_gameL, m_gameR, m_gameT, m_gameB, u, v)) {
       m_input.aimValid[hand] = true;
-      m_input.aimX[hand] = (px - m_gameL) / (m_gameR - m_gameL);
-      m_input.aimY[hand] = (m_gameT - py) / (m_gameT - m_gameB);
-      m_input.onScreen[hand] = m_input.aimX[hand] >= 0.f && m_input.aimX[hand] <= 1.f &&
-                               m_input.aimY[hand] >= 0.f && m_input.aimY[hand] <= 1.f;
+      m_input.aimX[hand] = u;
+      m_input.aimY[hand] = v;
+      m_input.onScreen[hand] = u >= 0 && u <= 1 && v >= 0 && v <= 1;
     }
   }
   m_viewsValid = true;
@@ -1922,17 +1953,21 @@ void DesktopXR::EndFlat(int view)
     m_cinemaValid[1] = false;
 }
 
-bool DesktopXR::PointerHand(int hand) const
+bool DesktopXR::PointerAim(int hand, float L, float R, float T, float B,
+                           float distance, float scale, bool extended, float& u, float& v) const
 {
-  // Only the gun hand gets a pointer (both when no gun hand is set). Shown wherever the game
-  // can be aimed: the 4:3 screen and, with the wide calibration, a screen-width past each edge.
-  if (!m_input.aimValid[hand] || (m_pointerHand >= 0 && hand != m_pointerHand))
+  if (!m_input.rayValid[hand] || (m_pointerHand >= 0 && hand != m_pointerHand))
     return false;
-  return m_input.aimX[hand] >= -1.f && m_input.aimX[hand] <= 2.f &&
-         m_input.aimY[hand] >= -1.f && m_input.aimY[hand] <= 2.f;
+  // SetScreen can change the game frustum after ApplyVRInput has consumed the sampled
+  // normalized aim. Reproject the SAME predicted ray for display; do not reuse that UV.
+  const auto origin = ControllerAim::SceneOrigin(m_input.rayOrigin[hand], m_headPose.position,
+                                                 m_config.positionalTracking);
+  return ControllerAim::ProjectPointer(origin, m_input.rayDir[hand], distance, scale,
+                                       L, R, T, B, extended, u, v);
 }
 
-void DesktopXR::DrawPointerRings(const float mvp[16], float L, float R, float T, float B)
+void DesktopXR::DrawPointerRings(const float mvp[16], float L, float R, float T, float B,
+                                float distance, float scale)
 {
   // Pointer rings at the aim points on a screen whose picture spans L..R, B..T at z = -1 in
   // the model space of mvp (the HUD panel, or the cinema screen).
@@ -1951,10 +1986,11 @@ void DesktopXR::DrawPointerRings(const float mvp[16], float L, float R, float T,
   glUseProgram(m_dotProgram);
   const float rt = 0.02f * (T - B);
   for (int hand = 0; hand < 2; hand++) {
-    if (!PointerHand(hand))
+    float u, v;
+    if (!PointerAim(hand, L, R, T, B, distance, scale, true, u, v))
       continue;
-    const float tx = L + m_input.aimX[hand] * (R - L);
-    const float ty = T - m_input.aimY[hand] * (T - B);
+    const float tx = L + u * (R - L);
+    const float ty = T - v * (T - B);
     float c[2], cx[2], cy[2];
     if (!project(tx, ty, c) || !project(tx + rt, ty, cx) || !project(tx, ty + rt, cy))
       continue;
@@ -2043,7 +2079,7 @@ void DesktopXR::DrawCinemaInEye(const New3D::VREye& eye)
   glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
   glBindTexture(GL_TEXTURE_2D, 0);
   if (m_hudPointers)
-    DrawPointerRings(mvp, sL, sR, sT, sB);
+    DrawPointerRings(mvp, sL, sR, sT, sB, kCinemaDistance, CinemaScale());
   glDisable(GL_BLEND);
   glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
   glBindVertexArray(0);
@@ -2065,9 +2101,7 @@ bool DesktopXR::HandMatrix(int h, float m[16]) const
   if (h < 0 || h > 1 || !m_handPoseValid[h])
     return false;
   const float s = m_config.worldUnitsPerMeter;
-  XrVector3f pos = m_handPose[h].position;
-  if (!m_config.positionalTracking)
-    pos = {pos.x - m_headPose.position.x, pos.y - m_headPose.position.y, pos.z - m_headPose.position.z};
+  const XrVector3f pos = ControllerAim::SceneOrigin(m_handPose[h].position, m_headPose.position, m_config.positionalTracking);
   float r[9];
   QuatToMat3(m_handPose[h].orientation, r);
   for (int col = 0; col < 3; col++)
@@ -2178,7 +2212,7 @@ void DesktopXR::DrawHandGuns(const New3D::VREye& eye)
   // The game gun from a file comes in the arcade's two gun colours (menu: Gun colour).
   if (slot == 2)
     glUniform4f(m_uGunTint, m_gunColour == 1 ? 0.88f : 0.07f, m_gunColour == 1 ? 0.07f : 0.26f,
-                m_gunColour == 1 ? 0.05f : 0.92f, 1.f);
+                m_gunColour == 1 ? 0.05f : 0.92f, m_gameFilePreserveMaterials ? (m_gunColour == 1 ? 2.f : 0.f) : 1.f);
   else
     glUniform4f(m_uGunTint, 0.f, 0.f, 0.f, 0.f);
   glActiveTexture(GL_TEXTURE0);
@@ -2363,6 +2397,15 @@ void DesktopXR::EndFrame()
   if (!m_frameBegun)
     return;
 
+#ifdef SUPERMODEL_FRAME
+  // Flush each finished eye early, then wait once while we still own ALL images.
+  // SteamVR's GL bridge on Zink/Turnip must not see partially rendered pictures.
+  if (m_eyes[0].acquired != UINT32_MAX || m_eyes[1].acquired != UINT32_MAX || m_hud.acquired != UINT32_MAX) {
+    glFlush();
+    if (m_waitForGpu)
+      glFinish();
+  }
+#endif
   for (auto& e : m_eyes)
     ReleaseImage(e);
   ReleaseImage(m_hud);
@@ -2478,6 +2521,9 @@ void DesktopXR::SetScreen(const New3D::VRScreenInfo& info)
     m_scene3D = scene3D;
     InfoLog("VR: 3D scene %s (%d models)", scene3D ? "on" : "off", info.mainModels);
   }
+  // A retained-scene redraw must not advance the game-state debounce counters.
+  if (info.cameraTurn < 0.f)
+    return;
   if (play == m_inPlay)
     m_playSwitchFrames = 0;
   else if (++m_playSwitchFrames >= (play ? 20 : 30)) {
@@ -2584,7 +2630,7 @@ void DesktopXR::DrawHudInEye(const New3D::VREye& eye)
   glBindTexture(GL_TEXTURE_2D, 0);
 
   if (m_hudPointers)
-    DrawPointerRings(mvp, m_gameL, m_gameR, m_gameT, m_gameB);
+    DrawPointerRings(mvp, m_gameL, m_gameR, m_gameT, m_gameB, m_config.hudDistance, 1.f);
 
   glBindVertexArray(0);
   glUseProgram(0);
@@ -2787,6 +2833,12 @@ bool DesktopXR::BeginEye(int eye, New3D::VREye& outEye)
   if (m_backdropTex && !m_config.cinema)
     DrawBackdrop(outEye);
 
+#ifdef SUPERMODEL_FRAME
+  if (m_config.gameDiagnostic && !m_gameDiagStats.captured && m_scene3D &&
+      m_diagnosticSourceFrame >= m_config.diagnosticCaptureFrame) {
+    CaptureDiagnosticEye(eye, m_diagnosticBackdropPixels[eye], m_diagnosticSample == 0);
+  }
+#endif
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   return true;
 }
@@ -2815,37 +2867,58 @@ void DesktopXR::EndEye(int eye)
     }
   }
 #ifdef SUPERMODEL_FRAME
-  if (m_config.gameDiagnostic && !m_gameDiagStats.captured &&
-      m_screen.cameraTurn >= 0.f && m_screen.hasFrustum && !m_screen.subTexture && m_screen.mainModels >= 48 &&
+  if (m_config.gameDiagnostic && !m_gameDiagStats.captured && m_scene3D &&
       m_diagnosticSourceFrame >= m_config.diagnosticCaptureFrame) {
-    bool clean = true;
-    GLenum error = GL_NO_ERROR;
-    while ((error = glGetError()) != GL_NO_ERROR) {
-      clean = false;
-      ++m_gameDiagStats.graphicsErrors;
-      InfoLog("VR game diagnostic: OpenGL error 0x%x before eye %d capture", error, eye);
-    }
-    auto& pixels = m_gameDiagnosticPixels[eye];
-    pixels.resize((size_t)m_curEye[eye].width * (size_t)m_curEye[eye].height * 4);
-    glBindFramebuffer(GL_FRAMEBUFFER, m_curEye[eye].fbo);
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(0, 0, m_curEye[eye].width, m_curEye[eye].height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-    while ((error = glGetError()) != GL_NO_ERROR) {
-      clean = false;
-      ++m_gameDiagStats.graphicsErrors;
-      InfoLog("VR game diagnostic: OpenGL error 0x%x reading eye %d capture", error, eye);
-    }
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
-    m_gameDiagnosticEyeCaptured[eye] = clean;
-    if (!clean)
-      pixels.clear();
+    m_gameDiagnosticEyeCaptured[eye] = CaptureDiagnosticEye(eye, m_gameDiagnosticPixels[eye], m_diagnosticSample == 0) &&
+                                     !m_diagnosticBackdropPixels[eye].empty();
   }
 #endif
+#ifdef SUPERMODEL_FRAME
+  glFlush();   // start this eye while the CPU prepares the next; release together in EndFrame
+#else
   ReleaseImage(m_eyes[eye]);
+#endif
   m_eyeDrawn[eye] = true;
 }
 
 #ifdef SUPERMODEL_FRAME
+bool DesktopXR::CaptureDiagnosticEye(int eye, std::vector<unsigned char>& pixels, bool validateObserver)
+{
+  bool clean = true;
+  auto errors = [&] {
+    for (GLenum error = glGetError(); error != GL_NO_ERROR; error = glGetError()) {
+      clean = false;
+      ++m_gameDiagStats.graphicsErrors;
+      InfoLog("VR game diagnostic: GL error 0x%x eye %d", error, eye);
+    }
+  };
+  errors();
+  const auto& target = m_curEye[eye];
+  glBindFramebuffer(GL_FRAMEBUFFER, target.fbo);
+  if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+    clean = false;
+    ++m_gameDiagStats.graphicsErrors;
+  }
+  pixels.resize((size_t)target.width * (size_t)target.height * 4);
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  glReadPixels(0, 0, target.width, target.height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+  if (validateObserver) {
+    // An unchanged source must survive an immediate second observation. This does NOT
+    // prove ordinary no-readback presentation: both reads force completion themselves.
+    std::vector<unsigned char> repeat(pixels.size());
+    glReadPixels(0, 0, target.width, target.height, GL_RGBA, GL_UNSIGNED_BYTE, repeat.data());
+    if (repeat != pixels) {
+      clean = false;
+      ++m_gameDiagStats.graphicsErrors;
+      InfoLog("VR game diagnostic: unchanged eye %d readbacks disagree", eye);
+    }
+  }
+  errors();
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  if (!clean) pixels.clear();
+  return clean;
+}
+
 bool DesktopXR::WriteGameDiagnosticCapture()
 {
   const int widths[2] = {m_eyes[0].width, m_eyes[1].width};
@@ -2857,33 +2930,46 @@ bool DesktopXR::WriteGameDiagnosticCapture()
     return false;
   }
   char leftPath[256], rightPath[256], metadataPath[256];
-  std::snprintf(leftPath, sizeof(leftPath), "FrameDiagnostics/eye-left-yaw%d-frame%llu.ppm",
-                m_config.diagnosticYaw, (unsigned long long)m_diagnosticSourceFrame);
-  std::snprintf(rightPath, sizeof(rightPath), "FrameDiagnostics/eye-right-yaw%d-frame%llu.ppm",
-                m_config.diagnosticYaw, (unsigned long long)m_diagnosticSourceFrame);
-  std::snprintf(metadataPath, sizeof(metadataPath), "FrameDiagnostics/eye-yaw%d-frame%llu.txt",
-                m_config.diagnosticYaw, (unsigned long long)m_diagnosticSourceFrame);
+  std::snprintf(leftPath, sizeof(leftPath), "FrameDiagnostics/eye-left-yaw%d-frame%llu-sample%02u.ppm",
+                m_config.diagnosticYaw, (unsigned long long)m_diagnosticSourceFrame, m_diagnosticSample);
+  std::snprintf(rightPath, sizeof(rightPath), "FrameDiagnostics/eye-right-yaw%d-frame%llu-sample%02u.ppm",
+                m_config.diagnosticYaw, (unsigned long long)m_diagnosticSourceFrame, m_diagnosticSample);
+  std::snprintf(metadataPath, sizeof(metadataPath), "FrameDiagnostics/eye-yaw%d-frame%llu-sample%02u.txt",
+                m_config.diagnosticYaw, (unsigned long long)m_diagnosticSourceFrame, m_diagnosticSample);
   const char* paths[2] = {leftPath, rightPath};
-  for (int eye = 0; eye < 2; ++eye) {
-    std::ofstream image(paths[eye], std::ios::binary);
-    image << "P6\n" << widths[eye] << ' ' << heights[eye] << "\n255\n";
-    const auto& pixels = m_gameDiagnosticPixels[eye];
-    for (int y = heights[eye] - 1; y >= 0; --y) {
-      for (int x = 0; x < widths[eye]; ++x) {
-        const size_t offset = ((size_t)y * (size_t)widths[eye] + (size_t)x) * 4;
-        image.put((char)pixels[offset]);
-        image.put((char)pixels[offset + 1]);
-        image.put((char)pixels[offset + 2]);
+  for (int stage = 0; stage < 2; ++stage) {
+    for (int eye = 0; eye < 2; ++eye) {
+      const std::string path = stage ? std::string(paths[eye]) + ".backdrop.ppm" : paths[eye];
+      std::ofstream image(path, std::ios::binary);
+      image << "P6\n" << widths[eye] << ' ' << heights[eye] << "\n255\n";
+      const auto& pixels = stage ? m_diagnosticBackdropPixels[eye] : m_gameDiagnosticPixels[eye];
+      std::vector<char> row((size_t)widths[eye] * 3);
+      for (int y = heights[eye] - 1; y >= 0; --y) {
+        for (int x = 0; x < widths[eye]; ++x) {
+          const size_t offset = ((size_t)y * (size_t)widths[eye] + (size_t)x) * 4;
+          for (int c = 0; c < 3; ++c) row[(size_t)x*3+c] = (char)pixels[offset+c];
+        }
+        image.write(row.data(), (std::streamsize)row.size());
       }
-    }
-    image.close();
-    if (!image) {
-      InfoLog("VR game diagnostic: failed writing eye %d capture to %s", eye, paths[eye]);
-      return false;
+      image.close();
+      if (!image) {
+        InfoLog("VR game diagnostic: failed writing eye %d capture to %s", eye, path.c_str());
+        return false;
+      }
     }
   }
   std::ofstream metadata(metadataPath);
-  metadata << "game_frame=" << m_diagnosticSourceFrame << '\n'
+  metadata << "sample=" << m_diagnosticSample << '\n'
+           << "hold_scene=" << (m_diagnosticHoldScene ? "true" : "false") << '\n'
+           << "new_game_frame=" << (m_screen.cameraTurn >= 0 ? "true" : "false") << '\n'
+           << "gpu_completion_wait=" << (m_waitForGpu ? "true" : "false") << '\n'
+           << "observer=blocking_readback_changes_scheduling\n"
+           << "backdrop_texture=" << m_backdropTex << '\n'
+           << "backdrop_extended=" << (m_config.backdropFill && m_scene3D ? "true" : "false") << '\n'
+           << "hand_yaw_pitch_roll=" << m_diagnosticHandYaw << ',' << m_diagnosticHandPitch << ',' << m_diagnosticHandRoll << '\n'
+           << "gun_mode=" << EffectiveGunMode() << '\n'
+           << "gun_vertices=" << m_gunCount[0] << ',' << m_gunCount[1] << ',' << m_gunCount[2] << '\n'
+           << "game_frame=" << m_diagnosticSourceFrame << '\n'
            << "models=" << m_screen.mainModels << '\n'
            << "main_view_has_frustum=" << (m_screen.hasFrustum ? "true" : "false") << '\n'
            << "sub_view_texture=" << (m_screen.subTexture ? "true" : "false") << '\n'
@@ -2898,6 +2984,14 @@ bool DesktopXR::WriteGameDiagnosticCapture()
            << "submitted_layer_count=" << m_gameDiagStats.lastSubmittedLayers << '\n'
            << "projection_layer_submitted=true\n"
            << "xr_end_frame=succeeded\n";
+  for (int hand = 0; hand < 2; ++hand) {
+    const auto& p = m_handPose[hand];
+    const auto& ray = m_input.rayDir[hand];
+    metadata << "hand" << hand << "_position=" << p.position.x << ',' << p.position.y << ',' << p.position.z << '\n'
+             << "hand" << hand << "_quaternion=" << p.orientation.x << ',' << p.orientation.y << ',' << p.orientation.z << ',' << p.orientation.w << '\n'
+             << "hand" << hand << "_ray=" << ray.x << ',' << ray.y << ',' << ray.z << '\n'
+             << "hand" << hand << "_aim=" << m_input.aimX[hand] << ',' << m_input.aimY[hand] << '\n';
+  }
   metadata.close();
   if (!metadata) {
     InfoLog("VR game diagnostic: failed writing capture metadata to %s", metadataPath);
@@ -2905,7 +2999,7 @@ bool DesktopXR::WriteGameDiagnosticCapture()
   }
   m_gameDiagStats.capturedGameFrame = m_diagnosticSourceFrame;
   m_gameDiagStats.capturedModels = m_screen.mainModels;
-  m_gameDiagStats.captured = true;
+  m_gameDiagStats.captured = ++m_diagnosticSample >= m_diagnosticSamples;
   InfoLog("VR game diagnostic capture: gameFrame=%llu models=%d shouldRender=%s forced=%s yaw=%d eyes=%dx%d/%dx%d files=%s,%s metadata=%s",
           (unsigned long long)m_diagnosticSourceFrame, m_screen.mainModels,
           m_frameState.shouldRender ? "true" : "false", m_frameState.shouldRender ? "false" : "true",
@@ -3118,9 +3212,10 @@ void DesktopXR::DrawHud(GLuint topLayerTex, bool pointers, int keepFirstRow, int
     glUniform1f(m_uDotAspect, (float)m_hud.width / (float)m_hud.height);
     glUniform1f(m_uDotRadius, 0.03f);
     for (int hand = 0; hand < 2; hand++) {
-      if (!PointerHand(hand) || !m_input.onScreen[hand])
+      float u, v;
+      if (!PointerAim(hand, m_gameL, m_gameR, m_gameT, m_gameB, m_config.hudDistance, 1.f, false, u, v))
         continue;
-      glUniform2f(m_uDotCenter, m_input.aimX[hand] * 2.f - 1.f, 1.f - m_input.aimY[hand] * 2.f);
+      glUniform2f(m_uDotCenter, u * 2.f - 1.f, 1.f - v * 2.f);
       if (hand == 0) glUniform3f(m_uDotColor, 1.f, 0.25f, 0.2f);
       else           glUniform3f(m_uDotColor, 0.2f, 0.8f, 1.f);
       glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
@@ -3131,7 +3226,11 @@ void DesktopXR::DrawHud(GLuint topLayerTex, bool pointers, int keepFirstRow, int
 
   glBindVertexArray(0);
   glUseProgram(0);
+#ifdef SUPERMODEL_FRAME
+  glFlush();
+#else
   ReleaseImage(m_hud);
+#endif
   m_hudDrawn = true;
   if (scissor)
     glEnable(GL_SCISSOR_TEST);
@@ -3143,6 +3242,7 @@ void DesktopXR::DrawHud(GLuint topLayerTex, bool pointers, int keepFirstRow, int
 
 void DesktopXR::SyncInput()
 {
+  m_handPoseValid[0] = m_handPoseValid[1] = false;
 #ifdef SUPERMODEL_FRAME
   m_frameViewProfileActive = false;
 #endif
@@ -3152,6 +3252,8 @@ void DesktopXR::SyncInput()
   si.activeActionSets = &active;
   if (xrSyncActions(m_session, &si) != XR_SUCCESS) {
     m_input = DesktopXRInput{};   // not focused (system menu open, etc.)
+    m_menuGrabHand = -1;
+    m_prevGrip[0] = m_prevGrip[1] = false;
 #ifdef SUPERMODEL_FRAME
     m_viewGesture.Update(false, false, (int64_t)m_frameState.predictedDisplayTime);
 #endif
@@ -3217,28 +3319,15 @@ void DesktopXR::SyncInput()
     if ((loc.locationFlags & need) != need)
       continue;
     handPose = loc.pose;
+    handPose.orientation = ControllerAim::Correct(handPose.orientation, m_config.aimNudgeX, m_config.aimNudgeY);
     o = handPose.position;
-    dir = Rotate(handPose.orientation, {0.f, 0.f, -1.f});
+    dir = ControllerAim::Forward(handPose.orientation);
     in.rayValid[h] = true;
     in.rayOrigin[h] = o;
     in.rayDir[h] = dir;
     m_handPose[h] = handPose;
     m_handPoseValid[h] = true;
 
-    // aim fine-tune: turn the ray a little to the side / up (degrees)
-    if (m_config.aimNudgeX != 0.f || m_config.aimNudgeY != 0.f) {
-      XrVector3f right = {-dir.z, 0.f, dir.x};   // dir x up, level
-      const float rl = std::sqrt(right.x * right.x + right.z * right.z);
-      if (rl > 1e-4f) {
-        right = {right.x / rl, 0.f, right.z / rl};
-        const XrVector3f up = {right.y * dir.z - right.z * dir.y, right.z * dir.x - right.x * dir.z, right.x * dir.y - right.y * dir.x};
-        const float tx = std::tan(m_config.aimNudgeX * 0.0174533f), ty = std::tan(m_config.aimNudgeY * 0.0174533f);
-        dir = {dir.x + right.x * tx + up.x * ty, dir.y + right.y * tx + up.y * ty, dir.z + right.z * tx + up.z * ty};
-        const float dl = std::sqrt(dir.x * dir.x + dir.y * dir.y + dir.z * dir.z);
-        dir = {dir.x / dl, dir.y / dl, dir.z / dl};
-      }
-    }
-    in.rayDir[h] = dir;
     if (m_menuOpen) {
       // pointer on the menu panel
       const float cs = std::cos(m_menuYaw), sn = std::sin(m_menuYaw);
@@ -3285,21 +3374,16 @@ void DesktopXR::SyncInput()
     } else
       m_menuGrabHand = -1;
     m_prevGrip[h] = in.grip[h];
-    if (dir.z > -1e-4f)
-      continue;
-    // In cinema mode the screen is smaller and nearer: aim at it instead.
+    // The game plane and gun rendering share the same scene origin, including rotation-only mode.
     const float pd = m_config.cinema ? kCinemaDistance : d;
     const float ps = m_config.cinema ? CinemaScale() : 1.f;
-    const float t = (-pd - o.z) / dir.z;
-    if (t <= 0.f)
-      continue;
-    const float px = (o.x + t * dir.x) / (pd * ps);
-    const float py = (o.y + t * dir.y) / (pd * ps);
     float L = m_gameL, R = m_gameR, T = m_gameT, B = m_gameB;
     if (m_config.cinema)
       CinemaRect(L, R, T, B);
-    const float nx = (px - L) / (R - L);
-    const float ny = (T - py) / (T - B);
+    float nx, ny;
+    const XrVector3f sceneOrigin = ControllerAim::SceneOrigin(o, m_headPose.position, m_config.positionalTracking);
+    if (!ControllerAim::Project(sceneOrigin, dir, pd, ps, L, R, T, B, nx, ny))
+      continue;
     in.aimValid[h] = true;
     in.onScreen[h] = nx >= 0.f && nx <= 1.f && ny >= 0.f && ny <= 1.f;
     // Not clamped: with the wide gun calibration the game aims (and draws its crosshair)

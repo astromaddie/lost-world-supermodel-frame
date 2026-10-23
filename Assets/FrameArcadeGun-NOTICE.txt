@@ -1,0 +1,20 @@
+Namco Arcade Gun by Martoscar
+https://sketchfab.com/3d-models/namco-arcade-gun-15fbd5b9add94a34b5c21746e3dd32be
+Licensed under Creative Commons Attribution 4.0 International (CC BY 4.0):
+https://creativecommons.org/licenses/by/4.0/
+
+This independently created model is not extracted from Time Crisis, The Lost
+World, or any ROM. The model is not covered by Supermodel's source-code license.
+No endorsement by Martoscar, Namco, Sega, or the original game authors is implied.
+
+Prior TC2 conversion: normalized axes and grip/muzzle calibration, reconstructed
+missing normals, baked base colors into a 1024-square atlas, omitted PBR maps,
+and combined mesh parts. Original geometry retained: 17,108 triangles.
+
+Lost World Frame conversion: topology, normals and scale retained; bore translated
+onto OpenXR aim-space -Z so the visible barrel, pointer and shots share one ray.
+The atlas is sampled into quantized per-triangle RGB materials. The original blue
+plastic/metal palette is retained; the existing Red option recolors blue plastic.
+Lighting is supplied by the existing gun renderer. Source and generated hashes,
+muzzle calibration, and modifications are recorded in FrameArcadeGun.json.
+Reproduce with Scripts/frame/import-arcade-gun.py and the approved TC2 source asset.
