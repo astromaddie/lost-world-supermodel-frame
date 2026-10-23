@@ -10,6 +10,9 @@
 #endif
 
 #include "DesktopXR.h"
+#ifdef SUPERMODEL_FRAME
+#include "OSD/FileSystemPath.h"
+#endif
 
 #ifdef _WIN32
   #define XR_USE_PLATFORM_WIN32
@@ -27,6 +30,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 
 // Supermodel's logger (OSD/Logger.h is not included: its INT64 typedef clashes with X11's).
 extern void InfoLog(const char *fmt, ...);
@@ -49,11 +53,16 @@ extern void InfoLog(const char *fmt, ...);
   X(xrReleaseSwapchainImage) X(xrEnumerateViewConfigurationViews) X(xrWaitFrame) \
   X(xrBeginFrame) X(xrEndFrame) X(xrLocateViews) X(xrStringToPath) X(xrCreateActionSet) \
   X(xrDestroyActionSet) X(xrCreateAction) X(xrSuggestInteractionProfileBindings) \
-  X(xrCreateActionSpace) X(xrAttachSessionActionSets) X(xrSyncActions) \
+  X(xrCreateActionSpace) X(xrAttachSessionActionSets) X(xrSyncActions) X(xrGetCurrentInteractionProfile) \
   X(xrGetActionStateBoolean) X(xrGetActionStateFloat) X(xrGetOpenGLGraphicsRequirementsKHR) \
   X(xrApplyHapticFeedback)
 
 namespace {
+
+#ifdef SUPERMODEL_FRAME
+constexpr const char* kValveFrameInteractionExtension = "XR_VALVE_frame_controller_interaction";
+constexpr const char* kValveFrameInteractionProfile = "/interaction_profiles/valve/frame_controller_valve";
+#endif
 
 PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr = nullptr;
 #define XR_DECLARE(name) PFN_##name name = nullptr;
@@ -267,6 +276,8 @@ bool DesktopXR::Check(XrResult r, const char* what)
 #ifdef SUPERMODEL_FRAME
   if (m_config.colorProbe)
     ++m_probeStats.xrErrors;
+  if (m_config.gameDiagnostic)
+    ++m_gameDiagStats.xrErrors;
 #endif
   if (r == XR_ERROR_INSTANCE_LOST || r == XR_ERROR_SESSION_LOST)
   {
@@ -281,6 +292,15 @@ bool DesktopXR::Check(XrResult r, const char* what)
   else
     std::snprintf(text, sizeof(text), "%d", (int)r);
   return Fail(std::string(what) + " failed: " + text);
+}
+
+bool DesktopXR::FrameRenderAllowed() const
+{
+#ifdef SUPERMODEL_FRAME
+  return m_frameState.shouldRender || (m_config.colorProbe && m_config.forceProbeRender) || m_config.gameDiagnostic;
+#else
+  return m_frameState.shouldRender;
+#endif
 }
 
 bool DesktopXR::LoadLoader()
@@ -332,11 +352,21 @@ bool DesktopXR::Init(const Config& config)
     return false;
 
   float scale = std::clamp(m_config.resolutionScale, 0.25f, 2.0f);
+#ifndef SUPERMODEL_FRAME
   if (m_config.maxEyeWidth > 0 && views[0].recommendedImageRectWidth * scale > (float)m_config.maxEyeWidth)
     scale = (float)m_config.maxEyeWidth / (float)views[0].recommendedImageRectWidth;
+#endif
   for (int eye = 0; eye < 2; eye++) {
+#ifdef SUPERMODEL_FRAME
+    // Frame uses an absolute square target. Runtime recommendations already include
+    // SteamVR's per-app scale, so multiplying them again makes this setting ambiguous.
+    const int target = m_config.maxEyeWidth > 0 ? m_config.maxEyeWidth : 2160;
+    int w = (int)std::lround(target * scale);
+    int h = w;
+#else
     int w = (int)std::lround(views[eye].recommendedImageRectWidth * scale);
     int h = (int)std::lround(views[eye].recommendedImageRectHeight * scale);
+#endif
     w = std::clamp(w, 64, (int)views[eye].maxImageRectWidth);
     h = std::clamp(h, 64, (int)views[eye].maxImageRectHeight);
     if (!CreateSwapchain(m_eyes[eye], w, h))
@@ -385,6 +415,15 @@ bool DesktopXR::CreateInstance()
   m_hasRefreshRate = has(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
   if (m_hasRefreshRate)
     enabled.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+#ifdef SUPERMODEL_FRAME
+  m_frameInteractionEnabled = has(kValveFrameInteractionExtension);
+  if (m_frameInteractionEnabled) {
+    enabled.push_back(kValveFrameInteractionExtension);
+    InfoLog("VR Frame input: enabling %s", kValveFrameInteractionExtension);
+  } else {
+    InfoLog("VR Frame input: runtime does not advertise %s; using the compatible controller profiles", kValveFrameInteractionExtension);
+  }
+#endif
 
   XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
   std::strncpy(ci.applicationInfo.applicationName, "Supermodel VR", XR_MAX_APPLICATION_NAME_SIZE - 1);
@@ -567,15 +606,29 @@ bool DesktopXR::CreateActions()
     }
     return Check(xrCreateAction(m_actionSet, &ci, &out), name);
   };
+#ifdef SUPERMODEL_FRAME
+  const char* aActionLabel = "Start (A)";
+  const char* bActionLabel = "Coin (B)";
+  const char* xActionLabel = "Coin (X)";
+  const char* yActionLabel = "Start (Y)";
+#else
+  const char* aActionLabel = "Start";
+  const char* bActionLabel = "Coin";
+  const char* xActionLabel = "Coin (left)";
+  const char* yActionLabel = "Start (left)";
+#endif
   if (!make(m_aimPose, XR_ACTION_TYPE_POSE_INPUT, "aim", "Aim", true) ||
       !make(m_trigger, XR_ACTION_TYPE_FLOAT_INPUT, "trigger", "Fire", true) ||
       !make(m_grip, XR_ACTION_TYPE_FLOAT_INPUT, "grip", "Grip", true) ||
-      !make(m_a, XR_ACTION_TYPE_BOOLEAN_INPUT, "button_a", "Start", false) ||
-      !make(m_b, XR_ACTION_TYPE_BOOLEAN_INPUT, "button_b", "Coin", false) ||
-      !make(m_x, XR_ACTION_TYPE_BOOLEAN_INPUT, "button_x", "Coin (left)", false) ||
-      !make(m_y, XR_ACTION_TYPE_BOOLEAN_INPUT, "button_y", "Start (left)", false) ||
+      !make(m_a, XR_ACTION_TYPE_BOOLEAN_INPUT, "button_a", aActionLabel, false) ||
+      !make(m_b, XR_ACTION_TYPE_BOOLEAN_INPUT, "button_b", bActionLabel, false) ||
+      !make(m_x, XR_ACTION_TYPE_BOOLEAN_INPUT, "button_x", xActionLabel, false) ||
+      !make(m_y, XR_ACTION_TYPE_BOOLEAN_INPUT, "button_y", yActionLabel, false) ||
       !make(m_menu, XR_ACTION_TYPE_BOOLEAN_INPUT, "menu", "Menu", false) ||
       !make(m_thumbClick, XR_ACTION_TYPE_BOOLEAN_INPUT, "thumb_click", "Thumbstick click", true) ||
+#ifdef SUPERMODEL_FRAME
+      !make(m_view, XR_ACTION_TYPE_BOOLEAN_INPUT, "frame_view", "View: close options / hold to recentre", false) ||
+#endif
       !make(m_haptic, XR_ACTION_TYPE_VIBRATION_OUTPUT, "recoil", "Recoil", true))
     return false;
 
@@ -584,6 +637,12 @@ bool DesktopXR::CreateActions()
     xrStringToPath(m_instance, s, &p);
     return p;
   };
+#ifdef SUPERMODEL_FRAME
+  if (m_frameInteractionEnabled)
+    m_frameInteractionProfilePath = path(kValveFrameInteractionProfile);
+  bool frameBindingsSuggested = false;
+  bool indexBindingsSuggested = false;
+#endif
 
   // Quest Touch controllers (Virtual Desktop, Link and SteamVR all expose this profile).
   const XrActionSuggestedBinding touch[] = {
@@ -604,11 +663,81 @@ bool DesktopXR::CreateActions()
     {m_haptic,     path("/user/hand/left/output/haptic")},
   };
   XrInteractionProfileSuggestedBinding suggested{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+#ifdef SUPERMODEL_FRAME
+  if (m_frameInteractionEnabled) {
+    const XrActionSuggestedBinding frame[] = {
+      {m_aimPose,    path("/user/hand/right/input/aim/pose")},
+      {m_aimPose,    path("/user/hand/left/input/aim/pose")},
+      {m_trigger,    path("/user/hand/right/input/trigger/value")},
+      {m_trigger,    path("/user/hand/left/input/trigger/value")},
+      {m_grip,       path("/user/hand/right/input/squeeze/value")},
+      {m_grip,       path("/user/hand/left/input/squeeze/value")},
+      {m_a,          path("/user/hand/right/input/a/click")},
+      {m_b,          path("/user/hand/right/input/b/click")},
+      {m_x,          path("/user/hand/right/input/x/click")},
+      {m_y,          path("/user/hand/right/input/y/click")},
+      {m_menu,       path("/user/hand/right/input/menu/click")},
+      {m_view,       path("/user/hand/left/input/view/click")},
+      {m_thumbClick, path("/user/hand/right/input/thumbstick/click")},
+      {m_thumbClick, path("/user/hand/left/input/thumbstick/click")},
+      {m_haptic,     path("/user/hand/right/output/haptic")},
+      {m_haptic,     path("/user/hand/left/output/haptic")},
+    };
+    suggested.interactionProfile = path(kValveFrameInteractionProfile);
+    suggested.suggestedBindings = frame;
+    suggested.countSuggestedBindings = (uint32_t)(sizeof(frame) / sizeof(frame[0]));
+    const XrResult frameBindingResult = xrSuggestInteractionProfileBindings(m_instance, &suggested);
+    if (XR_SUCCEEDED(frameBindingResult)) {
+      frameBindingsSuggested = true;
+      InfoLog("VR Frame input: suggested Steam Frame controller bindings");
+    } else
+      InfoLog("VR Frame input: optional Steam Frame profile suggestion failed (%d); compatible profiles remain available",
+              (int)frameBindingResult);
+  }
+#endif
+
+#ifdef SUPERMODEL_FRAME
+  // Preserve the established hand layout when a Steam Frame runtime falls back to Valve Index.
+  const XrActionSuggestedBinding index[] = {
+    {m_aimPose,    path("/user/hand/right/input/aim/pose")},
+    {m_aimPose,    path("/user/hand/left/input/aim/pose")},
+    {m_trigger,    path("/user/hand/right/input/trigger/value")},
+    {m_trigger,    path("/user/hand/left/input/trigger/value")},
+    {m_grip,       path("/user/hand/right/input/squeeze/value")},
+    {m_grip,       path("/user/hand/left/input/squeeze/value")},
+    {m_a,          path("/user/hand/right/input/a/click")},
+    {m_b,          path("/user/hand/right/input/b/click")},
+    {m_x,          path("/user/hand/left/input/a/click")},
+    {m_y,          path("/user/hand/left/input/b/click")},
+    {m_menu,       path("/user/hand/left/input/trackpad/click")},
+    {m_thumbClick, path("/user/hand/right/input/thumbstick/click")},
+    {m_thumbClick, path("/user/hand/left/input/thumbstick/click")},
+    {m_haptic,     path("/user/hand/right/output/haptic")},
+    {m_haptic,     path("/user/hand/left/output/haptic")},
+  };
+  suggested.interactionProfile = path("/interaction_profiles/valve/index_controller");
+  suggested.suggestedBindings = index;
+  suggested.countSuggestedBindings = (uint32_t)(sizeof(index) / sizeof(index[0]));
+  const XrResult indexBindingResult = xrSuggestInteractionProfileBindings(m_instance, &suggested);
+  if (XR_SUCCEEDED(indexBindingResult))
+    indexBindingsSuggested = true;
+  else
+    InfoLog("VR Frame input: optional Valve Index fallback profile suggestion failed (%d)", (int)indexBindingResult);
+#endif
+
   suggested.interactionProfile = path("/interaction_profiles/oculus/touch_controller");
   suggested.suggestedBindings = touch;
   suggested.countSuggestedBindings = (uint32_t)(sizeof(touch) / sizeof(touch[0]));
-  if (!Check(xrSuggestInteractionProfileBindings(m_instance, &suggested), "suggest touch bindings"))
+  const XrResult touchBindingResult = xrSuggestInteractionProfileBindings(m_instance, &suggested);
+#ifdef SUPERMODEL_FRAME
+  if (XR_FAILED(touchBindingResult) && !frameBindingsSuggested && !indexBindingsSuggested)
+    return Check(touchBindingResult, "suggest touch bindings");
+  if (XR_FAILED(touchBindingResult))
+    InfoLog("VR Frame input: optional Touch fallback profile suggestion failed (%d)", (int)touchBindingResult);
+#else
+  if (!Check(touchBindingResult, "suggest touch bindings"))
     return false;
+#endif
 
   // Generic fallback for any other controller.
   const XrActionSuggestedBinding simple[] = {
@@ -1397,8 +1526,19 @@ bool DesktopXR::BeginFrame()
   m_viewsValid = false;
   m_eyeDrawn[0] = m_eyeDrawn[1] = false;
   m_hudDrawn = false;
-  if (!m_sessionRunning)
+  if (!m_sessionRunning) {
+#ifdef SUPERMODEL_FRAME
+    m_viewGesture.Update(false, false, (int64_t)m_frameState.predictedDisplayTime);
+#endif
     return false;
+  }
+#ifdef SUPERMODEL_FRAME
+  if (m_config.gameDiagnostic && !m_gameDiagStats.captured) {
+    m_gameDiagnosticEyeCaptured[0] = m_gameDiagnosticEyeCaptured[1] = false;
+    m_gameDiagnosticPixels[0].clear();
+    m_gameDiagnosticPixels[1].clear();
+  }
+#endif
 
   m_frameState = {XR_TYPE_FRAME_STATE};
   if (m_waitThread.joinable()) {
@@ -1415,6 +1555,8 @@ bool DesktopXR::BeginFrame()
 #ifdef SUPERMODEL_FRAME
       if (probeMode)
         ++m_probeStats.waitFrameFailures;
+      if (m_config.gameDiagnostic)
+        ++m_gameDiagStats.waitFrameFailures;
 #endif
       return false;
     }
@@ -1425,6 +1567,8 @@ bool DesktopXR::BeginFrame()
 #ifdef SUPERMODEL_FRAME
       if (probeMode)
         ++m_probeStats.waitFrameFailures;
+      if (m_config.gameDiagnostic)
+        ++m_gameDiagStats.waitFrameFailures;
 #endif
       return false;
     }
@@ -1433,7 +1577,7 @@ bool DesktopXR::BeginFrame()
   const XrResult beginResult = xrBeginFrame(m_session, &bi);
   if (XR_FAILED(beginResult)) {
 #ifdef SUPERMODEL_FRAME
-    if (m_config.colorProbe)
+    if (m_config.colorProbe || m_config.gameDiagnostic)
       Check(beginResult, "xrBeginFrame");
 #endif
     return false;
@@ -1447,6 +1591,11 @@ bool DesktopXR::BeginFrame()
     m_frameDelta = m_displayPeriod;
   m_lastDisplayTime = m_frameState.predictedDisplayTime;
 
+#ifdef SUPERMODEL_FRAME
+  if (m_config.gameDiagnostic)
+    m_recenterPending = false;  // synthetic eye, head, and hand poses share the LOCAL-space origin
+  else
+#endif
   if (m_recenterPending) {
     // New origin: the head's position, rotated only around the vertical axis (keep the
     // floor level), so the game screen is straight ahead.
@@ -1470,10 +1619,10 @@ bool DesktopXR::BeginFrame()
   }
 
 #ifdef SUPERMODEL_FRAME
-  if (!m_config.colorProbe)
+  if (!m_config.colorProbe && !m_config.gameDiagnostic)
 #endif
     SyncInput();
-  if (!m_frameState.shouldRender && !forceProbeRender)
+  if (!FrameRenderAllowed())
     return false;
 
   XrViewLocateInfo li{XR_TYPE_VIEW_LOCATE_INFO};
@@ -1487,7 +1636,7 @@ bool DesktopXR::BeginFrame()
   const XrResult locateResult = xrLocateViews(m_session, &li, &vs, 2, &count, m_views);
   if (XR_FAILED(locateResult)) {
 #ifdef SUPERMODEL_FRAME
-    if (m_config.colorProbe)
+    if (m_config.colorProbe || m_config.gameDiagnostic)
       Check(locateResult, "xrLocateViews");
 #endif
     return false;
@@ -1498,6 +1647,10 @@ bool DesktopXR::BeginFrame()
       ++m_probeStats.viewCountFailures;
       Fail("xrLocateViews did not return exactly two stereo views");
     }
+    if (m_config.gameDiagnostic) {
+      ++m_gameDiagStats.viewCountFailures;
+      Fail("xrLocateViews did not return exactly two stereo views");
+    }
 #endif
     return false;
   }
@@ -1505,22 +1658,34 @@ bool DesktopXR::BeginFrame()
   const bool positionValid = (vs.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0;
   m_viewsValid = orientationValid;
 
-  XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
-  const XrResult locateHeadResult = xrLocateSpace(m_viewSpace, m_localSpace, m_frameState.predictedDisplayTime, &head);
 #ifdef SUPERMODEL_FRAME
-  if (probeMode && XR_FAILED(locateHeadResult))
-    Check(locateHeadResult, "xrLocateSpace for head pose");
+  if (m_config.gameDiagnostic) {
+    if (positionValid) {
+      const XrVector3f a = m_views[0].pose.position, b = m_views[1].pose.position;
+      const float d = std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z));
+      if (d > 0.04f && d < 0.09f)
+        m_ipd = d;
+    }
+    SetSyntheticDiagnosticPose();
+  } else
 #endif
-  if (XR_SUCCEEDED(locateHeadResult) &&
-      (head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT))
-    m_headPose = head.pose;
+  {
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+    const XrResult locateHeadResult = xrLocateSpace(m_viewSpace, m_localSpace, m_frameState.predictedDisplayTime, &head);
+#ifdef SUPERMODEL_FRAME
+    if (probeMode && XR_FAILED(locateHeadResult))
+      Check(locateHeadResult, "xrLocateSpace for head pose");
+#endif
+    if (XR_SUCCEEDED(locateHeadResult) &&
+        (head.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT))
+      m_headPose = head.pose;
 
-  if (m_viewsValid || (probeMode && forceProbeRender && positionValid)) {
-    const XrVector3f a = m_views[0].pose.position, b = m_views[1].pose.position;
-    const float d = std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z));
-    if (d > 0.04f && d < 0.09f)
-      m_ipd = d;
-  }
+    if (m_viewsValid || (probeMode && forceProbeRender && positionValid)) {
+      const XrVector3f a = m_views[0].pose.position, b = m_views[1].pose.position;
+      const float d = std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z));
+      if (d > 0.04f && d < 0.09f)
+        m_ipd = d;
+    }
 #ifdef SUPERMODEL_FRAME
   if (m_config.colorProbe && forceProbeRender && !(orientationValid && positionValid)) {
     // The runtime remains authoritative whenever it reports a complete view pose. In standby,
@@ -1542,9 +1707,60 @@ bool DesktopXR::BeginFrame()
     ++m_probeStats.syntheticViewFrames;
   }
 #endif
+  }
   UpdateComfort();
   return m_viewsValid;
 }
+
+#ifdef SUPERMODEL_FRAME
+void DesktopXR::SetSyntheticDiagnosticPose()
+{
+  const float yaw = (float)m_config.diagnosticYaw * 0.01745329251994329577f;
+  const XrQuaternionf rotation{0.f, std::sin(yaw * 0.5f), 0.f, std::cos(yaw * 0.5f)};
+  m_headPose.orientation = rotation;
+  m_headPose.position = {0.f, 0.f, 0.f};
+  m_input = DesktopXRInput{};
+  const float halfIpd = m_ipd * 0.5f;
+  for (int eye = 0; eye < 2; ++eye) {
+    m_views[eye].pose.orientation = rotation;
+    m_views[eye].pose.position = Rotate(rotation, {eye == 0 ? -halfIpd : halfIpd, 0.f, 0.f});
+    const XrFovf& f = m_views[eye].fov;
+    if (!std::isfinite(f.angleLeft) || !std::isfinite(f.angleRight) ||
+        !std::isfinite(f.angleUp) || !std::isfinite(f.angleDown) ||
+        f.angleLeft >= 0.f || f.angleRight <= 0.f || f.angleUp <= 0.f || f.angleDown >= 0.f)
+      m_views[eye].fov = {-0.785398163f, 0.785398163f, 0.785398163f, -0.785398163f};
+  }
+  for (int hand = 0; hand < 2; ++hand) {
+    const XrVector3f offset{hand == 0 ? 0.24f : -0.24f, -0.16f, -0.42f};
+    const XrVector3f origin = Rotate(rotation, offset);
+    const XrVector3f direction = Rotate(rotation, {0.f, 0.f, -1.f});
+    XrPosef pose{};
+    pose.orientation = rotation;
+    pose.position = origin;
+    m_handPose[hand] = pose;
+    m_handPoseValid[hand] = true;
+    m_input.rayValid[hand] = true;
+    m_input.rayOrigin[hand] = origin;
+    m_input.rayDir[hand] = direction;
+    if (direction.z < -1e-4f) {
+      const float distance = m_config.hudDistance;
+      const float t = (-distance - origin.z) / direction.z;
+      const float px = (origin.x + t * direction.x) / distance;
+      const float py = (origin.y + t * direction.y) / distance;
+      m_input.aimValid[hand] = true;
+      m_input.aimX[hand] = (px - m_gameL) / (m_gameR - m_gameL);
+      m_input.aimY[hand] = (m_gameT - py) / (m_gameT - m_gameB);
+      m_input.onScreen[hand] = m_input.aimX[hand] >= 0.f && m_input.aimX[hand] <= 1.f &&
+                               m_input.aimY[hand] >= 0.f && m_input.aimY[hand] <= 1.f;
+    }
+  }
+  m_viewsValid = true;
+  if (m_gameDiagStats.syntheticPoseFrames == 0)
+    InfoLog("VR game diagnostic: fixed synthetic head and hand poses, yaw=%d degrees, IPD=%.3f m",
+            m_config.diagnosticYaw, m_ipd);
+  ++m_gameDiagStats.syntheticPoseFrames;
+}
+#endif
 
 void DesktopXR::UpdateComfort()
 {
@@ -2146,15 +2362,19 @@ void DesktopXR::EndFrame()
 {
   if (!m_frameBegun)
     return;
-#ifdef SUPERMODEL_FRAME
-  const bool forceProbeRender = m_config.colorProbe && m_config.forceProbeRender;
-#else
-  const bool forceProbeRender = false;
-#endif
 
   for (auto& e : m_eyes)
     ReleaseImage(e);
   ReleaseImage(m_hud);
+#ifdef SUPERMODEL_FRAME
+  if (m_config.gameDiagnostic) {
+    GLenum error = GL_NO_ERROR;
+    while ((error = glGetError()) != GL_NO_ERROR) {
+      ++m_gameDiagStats.graphicsErrors;
+      InfoLog("VR game diagnostic: OpenGL error 0x%x during frame", error);
+    }
+  }
+#endif
 
   XrCompositionLayerProjectionView projViews[2]{{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW},
                                                  {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW}};
@@ -2163,7 +2383,7 @@ void DesktopXR::EndFrame()
   const XrCompositionLayerBaseHeader* layers[2];
   uint32_t layerCount = 0;
 
-  const bool renderAllowed = m_frameState.shouldRender || forceProbeRender;
+  const bool renderAllowed = FrameRenderAllowed();
   if (renderAllowed && m_viewsValid && m_eyeDrawn[0] && m_eyeDrawn[1]) {
     for (int eye = 0; eye < 2; eye++) {
       projViews[eye].pose = m_views[eye].pose;
@@ -2205,7 +2425,7 @@ void DesktopXR::EndFrame()
       ++m_probeStats.shouldRender;
     else
       ++m_probeStats.shouldNotRender;
-    if (!m_frameState.shouldRender && forceProbeRender)
+    if (!m_frameState.shouldRender && m_config.forceProbeRender)
       ++m_probeStats.forcedFrames;
     if (layerCount > 0 && m_eyeDrawn[0] && m_eyeDrawn[1])
       ++m_probeStats.projectionLayers;
@@ -2215,8 +2435,25 @@ void DesktopXR::EndFrame()
       InfoLog("VR probe: xrEndFrame %s, shouldRender=%s, forceRender=%s, submitted layers=%u (stereo projection)",
               endFrameOk ? "succeeded" : "failed",
               m_frameState.shouldRender ? "true" : "false",
-              forceProbeRender ? "true" : "false", layerCount);
+              m_config.forceProbeRender ? "true" : "false", layerCount);
     }
+  }
+  if (m_config.gameDiagnostic) {
+    ++m_gameDiagStats.endFrames;
+    if (m_frameState.shouldRender)
+      ++m_gameDiagStats.shouldRenderFrames;
+    else {
+      ++m_gameDiagStats.standbyFrames;
+      ++m_gameDiagStats.forcedFrames;
+    }
+    if (layerCount > 0 && m_eyeDrawn[0] && m_eyeDrawn[1])
+      ++m_gameDiagStats.projectionFrames;
+    m_gameDiagStats.lastSubmittedLayers = layerCount;
+    if (!endFrameOk)
+      ++m_gameDiagStats.endFrameFailures;
+    if (endFrameOk && layerCount > 0 && m_eyeDrawn[0] && m_eyeDrawn[1] &&
+        m_gameDiagnosticEyeCaptured[0] && m_gameDiagnosticEyeCaptured[1] && !m_gameDiagStats.captured)
+      WriteGameDiagnosticCapture();
   }
 #else
   Check(xrEndFrame(m_session, &ei), "xrEndFrame");
@@ -2450,7 +2687,7 @@ bool DesktopXR::AcquireImage(Swapchain& sc)
   const XrResult acquireResult = xrAcquireSwapchainImage(sc.handle, &ai, &index);
   if (XR_FAILED(acquireResult)) {
 #ifdef SUPERMODEL_FRAME
-    if (m_config.colorProbe)
+    if (m_config.colorProbe || m_config.gameDiagnostic)
       Check(acquireResult, "xrAcquireSwapchainImage");
 #endif
     return false;
@@ -2460,13 +2697,13 @@ bool DesktopXR::AcquireImage(Swapchain& sc)
   const XrResult waitResult = xrWaitSwapchainImage(sc.handle, &wi);
   if (XR_FAILED(waitResult)) {
 #ifdef SUPERMODEL_FRAME
-    if (m_config.colorProbe)
+    if (m_config.colorProbe || m_config.gameDiagnostic)
       Check(waitResult, "xrWaitSwapchainImage");
 #endif
     XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
     const XrResult releaseResult = xrReleaseSwapchainImage(sc.handle, &ri);
 #ifdef SUPERMODEL_FRAME
-    if (m_config.colorProbe && XR_FAILED(releaseResult))
+    if ((m_config.colorProbe || m_config.gameDiagnostic) && XR_FAILED(releaseResult))
       Check(releaseResult, "xrReleaseSwapchainImage after wait failure");
 #endif
     return false;
@@ -2483,7 +2720,7 @@ void DesktopXR::ReleaseImage(Swapchain& sc)
   XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
   const XrResult releaseResult = xrReleaseSwapchainImage(sc.handle, &ri);
 #ifdef SUPERMODEL_FRAME
-  if (m_config.colorProbe && XR_FAILED(releaseResult))
+  if ((m_config.colorProbe || m_config.gameDiagnostic) && XR_FAILED(releaseResult))
     Check(releaseResult, "xrReleaseSwapchainImage");
 #endif
   sc.acquired = UINT32_MAX;
@@ -2520,13 +2757,8 @@ void DesktopXR::ComputeEye(int eye, New3D::VREye& out) const
 
 bool DesktopXR::BeginEye(int eye, New3D::VREye& outEye)
 {
-#ifdef SUPERMODEL_FRAME
-  const bool forceProbeRender = m_config.colorProbe && m_config.forceProbeRender;
-#else
-  const bool forceProbeRender = false;
-#endif
   if (eye < 0 || eye > 1 || m_suppressEyes || !m_frameBegun ||
-      (!m_frameState.shouldRender && !forceProbeRender) || !m_viewsValid || m_eyeDrawn[eye])
+      !FrameRenderAllowed() || !m_viewsValid || m_eyeDrawn[eye])
     return false;
   Swapchain& sc = m_eyes[eye];
   if (!AcquireImage(sc))
@@ -2582,9 +2814,105 @@ void DesktopXR::EndEye(int eye)
         DrawMenuInEye(m_curEye[eye]);
     }
   }
+#ifdef SUPERMODEL_FRAME
+  if (m_config.gameDiagnostic && !m_gameDiagStats.captured &&
+      m_screen.cameraTurn >= 0.f && m_screen.hasFrustum && !m_screen.subTexture && m_screen.mainModels >= 48 &&
+      m_diagnosticSourceFrame >= m_config.diagnosticCaptureFrame) {
+    bool clean = true;
+    GLenum error = GL_NO_ERROR;
+    while ((error = glGetError()) != GL_NO_ERROR) {
+      clean = false;
+      ++m_gameDiagStats.graphicsErrors;
+      InfoLog("VR game diagnostic: OpenGL error 0x%x before eye %d capture", error, eye);
+    }
+    auto& pixels = m_gameDiagnosticPixels[eye];
+    pixels.resize((size_t)m_curEye[eye].width * (size_t)m_curEye[eye].height * 4);
+    glBindFramebuffer(GL_FRAMEBUFFER, m_curEye[eye].fbo);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, m_curEye[eye].width, m_curEye[eye].height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+    while ((error = glGetError()) != GL_NO_ERROR) {
+      clean = false;
+      ++m_gameDiagStats.graphicsErrors;
+      InfoLog("VR game diagnostic: OpenGL error 0x%x reading eye %d capture", error, eye);
+    }
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    m_gameDiagnosticEyeCaptured[eye] = clean;
+    if (!clean)
+      pixels.clear();
+  }
+#endif
   ReleaseImage(m_eyes[eye]);
   m_eyeDrawn[eye] = true;
 }
+
+#ifdef SUPERMODEL_FRAME
+bool DesktopXR::WriteGameDiagnosticCapture()
+{
+  const int widths[2] = {m_eyes[0].width, m_eyes[1].width};
+  const int heights[2] = {m_eyes[0].height, m_eyes[1].height};
+  if (m_gameDiagnosticPixels[0].empty() || m_gameDiagnosticPixels[1].empty())
+    return false;
+  if (!FileSystemPath::PathExists("FrameDiagnostics") && FileSystemPath::MakeDir("FrameDiagnostics") != 0) {
+    InfoLog("VR game diagnostic: cannot create FrameDiagnostics output directory");
+    return false;
+  }
+  char leftPath[256], rightPath[256], metadataPath[256];
+  std::snprintf(leftPath, sizeof(leftPath), "FrameDiagnostics/eye-left-yaw%d-frame%llu.ppm",
+                m_config.diagnosticYaw, (unsigned long long)m_diagnosticSourceFrame);
+  std::snprintf(rightPath, sizeof(rightPath), "FrameDiagnostics/eye-right-yaw%d-frame%llu.ppm",
+                m_config.diagnosticYaw, (unsigned long long)m_diagnosticSourceFrame);
+  std::snprintf(metadataPath, sizeof(metadataPath), "FrameDiagnostics/eye-yaw%d-frame%llu.txt",
+                m_config.diagnosticYaw, (unsigned long long)m_diagnosticSourceFrame);
+  const char* paths[2] = {leftPath, rightPath};
+  for (int eye = 0; eye < 2; ++eye) {
+    std::ofstream image(paths[eye], std::ios::binary);
+    image << "P6\n" << widths[eye] << ' ' << heights[eye] << "\n255\n";
+    const auto& pixels = m_gameDiagnosticPixels[eye];
+    for (int y = heights[eye] - 1; y >= 0; --y) {
+      for (int x = 0; x < widths[eye]; ++x) {
+        const size_t offset = ((size_t)y * (size_t)widths[eye] + (size_t)x) * 4;
+        image.put((char)pixels[offset]);
+        image.put((char)pixels[offset + 1]);
+        image.put((char)pixels[offset + 2]);
+      }
+    }
+    image.close();
+    if (!image) {
+      InfoLog("VR game diagnostic: failed writing eye %d capture to %s", eye, paths[eye]);
+      return false;
+    }
+  }
+  std::ofstream metadata(metadataPath);
+  metadata << "game_frame=" << m_diagnosticSourceFrame << '\n'
+           << "models=" << m_screen.mainModels << '\n'
+           << "main_view_has_frustum=" << (m_screen.hasFrustum ? "true" : "false") << '\n'
+           << "sub_view_texture=" << (m_screen.subTexture ? "true" : "false") << '\n'
+           << "view_rows=" << m_screen.viewFirstRow << '-' << m_screen.viewEndRow << '\n'
+           << "display_time_ns=" << (long long)m_frameState.predictedDisplayTime << '\n'
+           << "runtime_should_render=" << (m_frameState.shouldRender ? "true" : "false") << '\n'
+           << "force_render=" << (!m_frameState.shouldRender ? "true" : "false") << '\n'
+           << "pose_source=fixed_synthetic_head_and_hands\n"
+           << "yaw_degrees=" << m_config.diagnosticYaw << '\n'
+           << "left_size=" << widths[0] << 'x' << heights[0] << '\n'
+           << "right_size=" << widths[1] << 'x' << heights[1] << '\n'
+           << "submitted_layer_count=" << m_gameDiagStats.lastSubmittedLayers << '\n'
+           << "projection_layer_submitted=true\n"
+           << "xr_end_frame=succeeded\n";
+  metadata.close();
+  if (!metadata) {
+    InfoLog("VR game diagnostic: failed writing capture metadata to %s", metadataPath);
+    return false;
+  }
+  m_gameDiagStats.capturedGameFrame = m_diagnosticSourceFrame;
+  m_gameDiagStats.capturedModels = m_screen.mainModels;
+  m_gameDiagStats.captured = true;
+  InfoLog("VR game diagnostic capture: gameFrame=%llu models=%d shouldRender=%s forced=%s yaw=%d eyes=%dx%d/%dx%d files=%s,%s metadata=%s",
+          (unsigned long long)m_diagnosticSourceFrame, m_screen.mainModels,
+          m_frameState.shouldRender ? "true" : "false", m_frameState.shouldRender ? "false" : "true",
+          m_config.diagnosticYaw, widths[0], heights[0], widths[1], heights[1], leftPath, rightPath, metadataPath);
+  return true;
+}
+#endif
 
 #ifdef SUPERMODEL_FRAME
 bool DesktopXR::DrawColorProbeFrame()
@@ -2732,7 +3060,7 @@ void DesktopXR::DrawBackdrop(const New3D::VREye& eye)
 void DesktopXR::DrawHud(GLuint topLayerTex, bool pointers, int keepFirstRow, int keepEndRow,
                         GLuint subTex, const float* subUv)
 {
-  if (m_config.hudInEye || !m_frameBegun || !m_frameState.shouldRender || m_hudDrawn)
+  if (m_config.hudInEye || !m_frameBegun || !FrameRenderAllowed() || m_hudDrawn)
     return;
   if (!AcquireImage(m_hud))
     return;
@@ -2815,14 +3143,27 @@ void DesktopXR::DrawHud(GLuint topLayerTex, bool pointers, int keepFirstRow, int
 
 void DesktopXR::SyncInput()
 {
+#ifdef SUPERMODEL_FRAME
+  m_frameViewProfileActive = false;
+#endif
   XrActiveActionSet active{m_actionSet, XR_NULL_PATH};
   XrActionsSyncInfo si{XR_TYPE_ACTIONS_SYNC_INFO};
   si.countActiveActionSets = 1;
   si.activeActionSets = &active;
   if (xrSyncActions(m_session, &si) != XR_SUCCESS) {
     m_input = DesktopXRInput{};   // not focused (system menu open, etc.)
+#ifdef SUPERMODEL_FRAME
+    m_viewGesture.Update(false, false, (int64_t)m_frameState.predictedDisplayTime);
+#endif
     return;
   }
+#ifdef SUPERMODEL_FRAME
+  if (m_frameInteractionEnabled && m_frameInteractionProfilePath != XR_NULL_PATH) {
+    XrInteractionProfileState profile{XR_TYPE_INTERACTION_PROFILE_STATE};
+    if (XR_SUCCEEDED(xrGetCurrentInteractionProfile(m_session, m_hands[1], &profile)))
+      m_frameViewProfileActive = profile.interactionProfile == m_frameInteractionProfilePath;
+  }
+#endif
 
   auto getBool = [&](XrAction a, XrPath sub) {
     XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
@@ -2846,6 +3187,18 @@ void DesktopXR::SyncInput()
   in.buttonX = getBool(m_x, XR_NULL_PATH);
   in.buttonY = getBool(m_y, XR_NULL_PATH);
   in.menu    = getBool(m_menu, XR_NULL_PATH);
+#ifdef SUPERMODEL_FRAME
+  XrActionStateGetInfo viewInfo{XR_TYPE_ACTION_STATE_GET_INFO};
+  viewInfo.action = m_view;
+  XrActionStateBoolean viewState{XR_TYPE_ACTION_STATE_BOOLEAN};
+  const bool viewActive = m_view != XR_NULL_HANDLE &&
+      XR_SUCCEEDED(xrGetActionStateBoolean(m_session, &viewInfo, &viewState)) && viewState.isActive;
+  const FrameViewGesture::Event viewEvent = m_viewGesture.Update(
+      m_focused.load(), viewActive && viewState.currentState,
+      (int64_t)m_frameState.predictedDisplayTime);
+  in.viewTap = viewEvent == FrameViewGesture::tap;
+  in.viewHold = viewEvent == FrameViewGesture::hold;
+#endif
 
   const float d = m_config.hudDistance;
   for (int h = 0; h < 2; h++) {
@@ -2855,14 +3208,23 @@ void DesktopXR::SyncInput()
 
     // Aim ray -> game screen: intersect with the HUD plane (z = -d) and normalise against
     // the game's frustum at that distance. Matches where the HUD is drawn.
+    XrPosef handPose{};
+    XrVector3f o{}, dir{};
     XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
     if (XR_FAILED(xrLocateSpace(m_aimSpaces[h], m_localSpace, m_frameState.predictedDisplayTime, &loc)))
       continue;
     const XrSpaceLocationFlags need = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
     if ((loc.locationFlags & need) != need)
       continue;
-    const XrVector3f o = loc.pose.position;
-    XrVector3f dir = Rotate(loc.pose.orientation, {0.f, 0.f, -1.f});
+    handPose = loc.pose;
+    o = handPose.position;
+    dir = Rotate(handPose.orientation, {0.f, 0.f, -1.f});
+    in.rayValid[h] = true;
+    in.rayOrigin[h] = o;
+    in.rayDir[h] = dir;
+    m_handPose[h] = handPose;
+    m_handPoseValid[h] = true;
+
     // aim fine-tune: turn the ray a little to the side / up (degrees)
     if (m_config.aimNudgeX != 0.f || m_config.aimNudgeY != 0.f) {
       XrVector3f right = {-dir.z, 0.f, dir.x};   // dir x up, level
@@ -2876,11 +3238,7 @@ void DesktopXR::SyncInput()
         dir = {dir.x / dl, dir.y / dl, dir.z / dl};
       }
     }
-    in.rayValid[h] = true;
-    in.rayOrigin[h] = o;
     in.rayDir[h] = dir;
-    m_handPose[h] = loc.pose;
-    m_handPoseValid[h] = true;
     if (m_menuOpen) {
       // pointer on the menu panel
       const float cs = std::cos(m_menuYaw), sn = std::sin(m_menuYaw);

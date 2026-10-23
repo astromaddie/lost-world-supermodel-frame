@@ -128,6 +128,17 @@ static const std::string s_logFilePath = Util::Format() << FileSystemPath::GetPa
 
 static Util::Config::Node s_runtime_config("Global");
 
+#ifdef SUPERMODEL_FRAME
+struct FrameGameDiagnosticOptions
+{
+  bool enabled = false;
+  int yawDegrees = 0;
+  uint64_t captureFrame = 1500;
+  unsigned seconds = 120;
+};
+static FrameGameDiagnosticOptions s_frameGameDiagnostic;
+#endif
+
 
 /******************************************************************************
  Display Management
@@ -1000,6 +1011,8 @@ static void VRSaveSettings()
 // Controllers -> the virtual mouse/keyboard the SDL input system reads (see VRInput.h).
 // GPU time per headset frame (GL timer query, read back a few frames later, never blocking).
 static GLuint s_vrGpuQueries[4] = { 0, 0, 0, 0 };
+// A name from glGenQueries is not queryable until a query has been ended with it.
+static bool   s_vrGpuQueryPending[4] = { false, false, false, false };
 static int    s_vrGpuQueryIdx = 0;
 static bool   s_vrGpuQueryActive = false;
 double g_vrGpuMsSum = 0.0;
@@ -1011,22 +1024,21 @@ static void VRGpuTimerBegin()
   if (!s_vrGpuQueries[0])
     glGenQueries(4, s_vrGpuQueries);
   GLuint q = s_vrGpuQueries[s_vrGpuQueryIdx];
-  GLint avail = 0;
-  glGetQueryObjectiv(q, GL_QUERY_RESULT_AVAILABLE, &avail);
-  static bool used[4] = { false, false, false, false };
-  if (used[s_vrGpuQueryIdx])
+  if (s_vrGpuQueryPending[s_vrGpuQueryIdx])
   {
+    GLint avail = 0;
+    glGetQueryObjectiv(q, GL_QUERY_RESULT_AVAILABLE, &avail);
     if (!avail)
       return;   // still in flight: skip timing this frame
     GLuint64 ns = 0;
     glGetQueryObjectui64v(q, GL_QUERY_RESULT, &ns);
+    s_vrGpuQueryPending[s_vrGpuQueryIdx] = false;
     const double ms = (double)ns * 1e-6;
     g_vrGpuMsSum += ms;
     g_vrGpuMsCount++;
     g_vrGpuMsWorst = (std::max)(g_vrGpuMsWorst, ms);
   }
   glBeginQuery(GL_TIME_ELAPSED, q);
-  used[s_vrGpuQueryIdx] = true;
   s_vrGpuQueryActive = true;
 }
 
@@ -1035,6 +1047,7 @@ static void VRGpuTimerEnd()
   if (!s_vrGpuQueryActive)
     return;
   glEndQuery(GL_TIME_ELAPSED);
+  s_vrGpuQueryPending[s_vrGpuQueryIdx] = true;
   s_vrGpuQueryActive = false;
   s_vrGpuQueryIdx = (s_vrGpuQueryIdx + 1) & 3;
 }
@@ -1141,12 +1154,30 @@ static void ApplyVRInput(DesktopXR &xr)
   g_vrInput.test    = in.grip[1] && in.thumbClick[1] && !s_vrMenuOpen;   // left grip + left stick click
   g_vrInput.service = false;
 
+#ifdef SUPERMODEL_FRAME
+  // Steam Frame uses a short View release to close an open options panel and a one-second
+  // View hold to recentre. If a non-Frame fallback profile is active, retain the old stick-click
+  // recenter behavior for that controller.
+  if (xr.FrameViewProfileActive()) {
+    if (in.viewHold) {
+      xr.Recenter();
+      xr.Haptic(0, 0.6f, 0.08f);
+      xr.Haptic(1, 0.6f, 0.08f);
+    }
+  } else {
+    const bool recenter = in.thumbClick[0] || (in.thumbClick[1] && !in.grip[1]);
+    if (recenter && !s_vrPrevRecenter)
+      xr.Recenter();
+    s_vrPrevRecenter = recenter;
+  }
+#else
   // Either stick click: re-centre the view (game screen straight ahead). Not with the left
   // grip held - that is the operator menu.
   const bool recenter = in.thumbClick[0] || (in.thumbClick[1] && !in.grip[1]);
   if (recenter && !s_vrPrevRecenter)
     xr.Recenter();
   s_vrPrevRecenter = recenter;
+#endif
 }
 
 /******************************************************************************
@@ -1254,6 +1285,11 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   bool        quit = false;
   bool        paused = false;
   bool        dumpTimings = false;
+#ifdef SUPERMODEL_FRAME
+  uint64_t diagnosticStartTicks = 0;
+  uint64_t diagnosticTimeoutTicks = 0;
+  int diagnosticExitCode = 0;
+#endif
 
   // Initialize and load ROMs
   if (Result::OKAY != Model3->Init())
@@ -1400,6 +1436,12 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
       vc.resolutionScale    = s_runtime_config["VRResolutionScale"].ValueAsDefault<float>(vc.resolutionScale);
       vc.maxEyeWidth        = s_runtime_config["VRMaxEyeWidth"].ValueAsDefault<int>(vc.maxEyeWidth);
       vc.refreshHz          = s_runtime_config["VRRefreshHz"].ValueAsDefault<float>(vc.refreshHz);
+#ifdef SUPERMODEL_FRAME
+      vc.gameDiagnostic = s_frameGameDiagnostic.enabled;
+      vc.diagnosticYaw = s_frameGameDiagnostic.yawDegrees;
+      vc.diagnosticCaptureFrame = s_frameGameDiagnostic.captureFrame;
+      vc.diagnosticSeconds = s_frameGameDiagnostic.seconds;
+#endif
       s_vrLateLatchMs       = std::clamp(s_runtime_config["VRLateLatchMs"].ValueAsDefault<float>(s_vrLateLatchMs), 0.0f, 10.0f);
       vc.hudInEye           = !s_runtime_config["VRHudLayer"].ValueAsDefault<bool>(false);
       vc.hudLock            = s_runtime_config["VRHudLock"].ValueAsDefault<int>(vc.hudLock);
@@ -1530,6 +1572,17 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
     }
   }
 
+#ifdef SUPERMODEL_FRAME
+  if (s_frameGameDiagnostic.enabled && !xr) {
+    ErrorLog("VR game diagnostic: OpenXR initialization failed; refusing to run a flat game session.");
+    g_vrInput.active = false;
+    delete Render2D;
+    delete Render3D;
+    delete superAA;
+    return 1;
+  }
+#endif
+
   // Debug: the VR wide gun calibration in a flat window (for measuring the aim mapping)
   if (!vrCalModel3 && getenv("SM_DBG_WIDEAIM"))
   {
@@ -1555,7 +1608,11 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   // CONTINUE screen by an older build) is deleted on load and a new one taken.
   // Delete Saves/<game>.vrlogo to take a new one.
   vrBootPath = Util::Format() << FileSystemPath::GetPath(FileSystemPath::Saves) << game.name << ".vrlogo";
-  if (xr && initialState.empty() && s_runtime_config["VRQuickBoot"].ValueAsDefault<bool>(true))
+  if (xr && initialState.empty() && s_runtime_config["VRQuickBoot"].ValueAsDefault<bool>(true)
+#ifdef SUPERMODEL_FRAME
+      && !s_frameGameDiagnostic.enabled
+#endif
+      )
   {
     if (FILE *f = fopen(vrBootPath.c_str(), "rb"))
     {
@@ -1596,6 +1653,10 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   quit = false;
   paused = false;
   dumpTimings = false;
+#ifdef SUPERMODEL_FRAME
+  diagnosticStartTicks = SDL_GetPerformanceCounter();
+  diagnosticTimeoutTicks = s_perfCounterFrequency * s_frameGameDiagnostic.seconds;
+#endif
 #ifdef DEBUG
   if (dynamic_cast<CModel3GraphicsState *>(Model3))
   {
@@ -1643,6 +1704,16 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
       vrPaced = xr->IsSessionRunning();
       if (!vrStarted)
       {
+#ifdef SUPERMODEL_FRAME
+        if (s_frameGameDiagnostic.enabled && xr->IsSessionRunning()) {
+          // The opt-in diagnostic deliberately runs the game while SteamVR is in standby.
+          vrStarted = true;
+          vrLastPumpTicks = 0;
+          vrEmuAccumulator = 0.0;
+          InfoLog("VR game diagnostic: starting simulation without requiring headset focus");
+        } else
+#endif
+        {
         // ~0.5 s of the headset in front and in use, then the game starts
         vrFocusFrames = (vrRender && xr->IsFocused()) ? vrFocusFrames + 1 : 0;
         if (vrFocusFrames >= 36)
@@ -1651,6 +1722,7 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
           vrLastPumpTicks = 0;
           vrEmuAccumulator = 0.0;
           InfoLog("VR: headset in use - game started");
+        }
         }
       }
       ApplyVRInput(*xr);
@@ -1666,6 +1738,10 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
         const DesktopXRInput &vin = xr->Input();
         const bool menuButton = vin.menu;
         bool toggle = menuButton && !s_vrPrevMenuButton;
+#ifdef SUPERMODEL_FRAME
+        if (vin.viewTap && s_vrMenuOpen)
+          toggle = true;
+#endif
         s_vrPrevMenuButton = menuButton;
         VRMenuResult mr;
         if (s_vrMenuOpen)
@@ -1836,6 +1912,10 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
       vrFramesToRun = 0;
       if (vrHaveNew)
       {
+#ifdef SUPERMODEL_FRAME
+        if (s_frameGameDiagnostic.enabled && vrModel3)
+          xr->SetDiagnosticSourceFrame(vrModel3->GetTimings().frameId);
+#endif
         Model3->RenderFrame();   // draws the window, the light gun reads and both eyes
         vrHaveNew = false;
         vrFramesToRun = 1;
@@ -1905,6 +1985,10 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
       for (int i = 0; i < vrFramesToRun; i++)
       {
         xr->SuppressEyes(i + 1 < vrFramesToRun);   // only the newest frame goes to the eyes
+#ifdef SUPERMODEL_FRAME
+        if (s_frameGameDiagnostic.enabled && vrModel3)
+          xr->SetDiagnosticSourceFrame(vrModel3->GetTimings().frameId + 1);
+#endif
         Model3->RunFrame();
       }
       xr->SuppressEyes(false);
@@ -1951,6 +2035,20 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
       VRGpuTimerEnd();
       xr->EndFrame();
 
+#ifdef SUPERMODEL_FRAME
+      if (s_frameGameDiagnostic.enabled) {
+        if (xr->DiagnosticCaptured()) {
+          InfoLog("VR game diagnostic: requested gameplay eye capture completed");
+          quit = true;
+        } else if (SDL_GetPerformanceCounter() - diagnosticStartTicks >= diagnosticTimeoutTicks) {
+          ErrorLog("VR game diagnostic: timed out after %u seconds before a valid gameplay eye capture",
+                   s_frameGameDiagnostic.seconds);
+          quit = true;
+          diagnosticExitCode = 1;
+        }
+      }
+#endif
+
       vrStatDisplay++;
       const uint64_t now = SDL_GetPerformanceCounter();
       if (vrStatTicks == 0)
@@ -1966,7 +2064,7 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
           ppcMs = ft.ppcTicks;
           frameMs = ft.frameTicks;
         }
-        InfoLog("[VRPERF] headset=%.1fHz display=%.1ffps emu=%.1ffps (target %.1f) async=%d locked=%d late=%d worstFrame=%.1fms emuCost=%.1fms ppc=%ums frame=%ums emuFrameAvg=%.1fms doneToCollect=%.1f/%.1fms latched=%d gpu=%.1fms gpuWorst=%.1fms mirrorSwap=%.1fms redraws=%d eyes=%dx%d",
+        InfoLog("[VRPERF] runtimePeriod=%.1fHz display=%.1ffps emu=%.1ffps (target %.1f) async=%d locked=%d late=%d worstFrame=%.1fms emuCost=%.1fms ppc=%ums frame=%ums emuFrameAvg=%.1fms doneToCollect=%.1f/%.1fms latched=%d gpu=%.1fms gpuWorst=%.1fms mirrorSwap=%.1fms redraws=%d eyes=%dx%d",
                 1.0 / xr->DisplayPeriodSeconds(), vrStatDisplay / secs, vrStatEmu / secs, (double)GetDesiredRefreshRateMilliHz() / 1000.0,
                 (int)vrAsync, (int)vrLocked, vrStatLate, vrStatWorstMs,
                 vrStatDisplay ? 1000.0 * vrStatEmuSecs / vrStatDisplay : 0.0, ppcMs, frameMs,
@@ -2299,6 +2397,29 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   // Save NVRAM
   SaveNVRAM(Model3);
 
+#ifdef SUPERMODEL_FRAME
+  if (s_frameGameDiagnostic.enabled) {
+    DesktopXR::GameDiagnosticStats stats;
+    if (xr)
+      stats = xr->DiagnosticStats();
+    InfoLog("VR game diagnostic summary: endFrames=%llu failures=%llu shouldRender=%llu standby=%llu forced=%llu projections=%llu lastLayers=%u waitFailures=%llu viewCountFailures=%llu xrErrors=%llu glErrors=%llu syntheticPoseFrames=%llu captured=%s gameFrame=%llu models=%d",
+            (unsigned long long)stats.endFrames, (unsigned long long)stats.endFrameFailures,
+            (unsigned long long)stats.shouldRenderFrames, (unsigned long long)stats.standbyFrames,
+            (unsigned long long)stats.forcedFrames, (unsigned long long)stats.projectionFrames,
+            stats.lastSubmittedLayers, (unsigned long long)stats.waitFrameFailures,
+            (unsigned long long)stats.viewCountFailures, (unsigned long long)stats.xrErrors,
+            (unsigned long long)stats.graphicsErrors, (unsigned long long)stats.syntheticPoseFrames,
+            stats.captured ? "yes" : "no", (unsigned long long)stats.capturedGameFrame, stats.capturedModels);
+    if (!xr || !stats.captured || stats.capturedGameFrame < s_frameGameDiagnostic.captureFrame ||
+        stats.capturedModels < 48 || stats.projectionFrames == 0 || stats.lastSubmittedLayers == 0 ||
+        stats.endFrameFailures != 0 || stats.waitFrameFailures != 0 || stats.viewCountFailures != 0 ||
+        stats.xrErrors != 0 || stats.graphicsErrors != 0) {
+      ErrorLog("VR game diagnostic: no clean stereo gameplay capture was produced");
+      diagnosticExitCode = 1;
+    }
+  }
+#endif
+
   // Close audio
   CloseAudio();
 
@@ -2309,7 +2430,11 @@ int Supermodel(const Game &game, ROMSet *rom_set, IEmulator *Model3, CInputs *In
   delete Render3D;
   delete superAA;
 
+#ifdef SUPERMODEL_FRAME
+  return diagnosticExitCode;
+#else
   return 0;
+#endif
 
   // Quit with an error
 QuitError:
@@ -2489,6 +2614,13 @@ Util::Config::Node DefaultConfig()
   config.Set<std::string>("CrosshairStyle", "vector", "Video", "", "", { "bmp","vector" });
   config.Set("NoWhiteFlash", false, "Video");
   config.Set("VR", false, "Video");
+#ifdef SUPERMODEL_FRAME
+  // Measured standalone gameplay profile. The full 2160-square target remains
+  // available at scale 1.0; the desktop mirror costs valuable GPU time on Frame.
+  config.Set("VRResolutionScale", 0.5f, "Video", 0.5f, 1.5f);
+  config.Set("VRRefreshHz", 72.0f, "Video", 0.0f, 144.0f);
+  config.Set("VRMirror", false, "Video");
+#endif
   config.Set("FlipStereo", false, "Sound");
 #ifdef SUPERMODEL_WIN32
   config.Set<std::string>("InputSystem", "dinput", "Core", "", "", { "sdl","sdlgamepad","dinput","xinput","rawinput" });
@@ -2803,6 +2935,10 @@ static void Help(void)
   puts("  -vr-probe               Draw distinct colours to both OpenXR eyes, without a ROM");
   puts("  -vr-probe-seconds=<n>   Probe duration in seconds (1-300; default 30)");
   puts("  -vr-probe-force-render  Probe-only diagnostic when the runtime says shouldRender=false");
+  puts("  -vr-game-diagnostic     Bounded gameplay eye capture, including forced standby rendering");
+  puts("  -vr-game-diagnostic-yaw=<deg>  Synthetic head/hand yaw: 0, 90, or 180 (default 0)");
+  puts("  -vr-game-diagnostic-frame=<n>  Capture game frame (default 1500)");
+  puts("  -vr-game-diagnostic-seconds=<n> Timeout in seconds (1-300; default 120)");
 #endif
   puts("  -true-hz                Use true Model 3 refresh rate of 57.524 Hz");
   puts("  -show-fps               Display frame rate in window title bar");
@@ -2946,6 +3082,8 @@ struct ParsedCommandLine
   bool vr_probe = false;
   bool vr_probe_force_render = false;
   unsigned vr_probe_seconds = 30;
+  FrameGameDiagnosticOptions frame_game_diagnostic;
+  bool frame_game_diagnostic_parameter_seen = false;
 #endif
   bool disable_debugger = false;
   bool enter_debugger = false;
@@ -3037,6 +3175,22 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     { "-dump-memory",         { "DumpMemory",       true } },
     { "-dump-textures",       { "DumpTextures",     true } },
   };
+#ifdef SUPERMODEL_FRAME
+  auto parseUnsigned = [](const std::string& text, uint64_t maxValue, uint64_t& out) {
+    if (text.empty() || text[0] == '-')
+      return false;
+    try {
+      size_t consumed = 0;
+      const unsigned long long value = std::stoull(text, &consumed);
+      if (consumed != text.size() || value > maxValue)
+        return false;
+      out = (uint64_t)value;
+      return true;
+    } catch (...) {
+      return false;
+    }
+  };
+#endif
   for (int i = 1; i < argc; i++)
   {
     std::string arg(argv[i]);
@@ -3083,6 +3237,52 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
       if (arg == "-?" || arg == "-h" || arg == "-help" || arg == "--help")
         cmd_line.print_help = true;
 #ifdef SUPERMODEL_FRAME
+      else if (arg == "-vr-game-diagnostic")
+        cmd_line.frame_game_diagnostic.enabled = true;
+      else if (arg == "-vr-game-diagnostic-yaw" || arg.find("-vr-game-diagnostic-yaw=") == 0)
+      {
+        const size_t equals = arg.find('=');
+        int value = -1;
+        bool valid = false;
+        if (equals != std::string::npos) {
+          try {
+            size_t consumed = 0;
+            value = std::stoi(arg.substr(equals + 1), &consumed);
+            valid = consumed == arg.size() - equals - 1 && (value == 0 || value == 90 || value == 180);
+          } catch (...) {}
+        }
+        if (!valid) {
+          ErrorLog("'-vr-game-diagnostic-yaw' requires 0, 90, or 180 degrees.");
+          cmd_line.error = true;
+        } else {
+          cmd_line.frame_game_diagnostic.yawDegrees = value;
+          cmd_line.frame_game_diagnostic_parameter_seen = true;
+        }
+      }
+      else if (arg == "-vr-game-diagnostic-frame" || arg.find("-vr-game-diagnostic-frame=") == 0)
+      {
+        const size_t equals = arg.find('=');
+        uint64_t value = 0;
+        if (equals == std::string::npos || !parseUnsigned(arg.substr(equals + 1), 1000000000ULL, value) || value == 0) {
+          ErrorLog("'-vr-game-diagnostic-frame' requires a game frame from 1 to 1000000000.");
+          cmd_line.error = true;
+        } else {
+          cmd_line.frame_game_diagnostic.captureFrame = value;
+          cmd_line.frame_game_diagnostic_parameter_seen = true;
+        }
+      }
+      else if (arg == "-vr-game-diagnostic-seconds" || arg.find("-vr-game-diagnostic-seconds=") == 0)
+      {
+        const size_t equals = arg.find('=');
+        uint64_t value = 0;
+        if (equals == std::string::npos || !parseUnsigned(arg.substr(equals + 1), 300, value) || value < 1) {
+          ErrorLog("'-vr-game-diagnostic-seconds' requires an integer from 1 to 300.");
+          cmd_line.error = true;
+        } else {
+          cmd_line.frame_game_diagnostic.seconds = (unsigned)value;
+          cmd_line.frame_game_diagnostic_parameter_seen = true;
+        }
+      }
       else if (arg == "-vr-probe")
       {
         cmd_line.vr_probe = true;
@@ -3275,6 +3475,16 @@ static ParsedCommandLine ParseCommandLine(int argc, char **argv)
     ErrorLog("'-vr-probe-force-render' requires '-vr-probe'.");
     cmd_line.error = true;
   }
+  if (cmd_line.frame_game_diagnostic_parameter_seen && !cmd_line.frame_game_diagnostic.enabled) {
+    ErrorLog("'-vr-game-diagnostic-*' options require '-vr-game-diagnostic'.");
+    cmd_line.error = true;
+  }
+  if (cmd_line.frame_game_diagnostic.enabled && cmd_line.vr_probe) {
+    ErrorLog("'-vr-game-diagnostic' cannot be combined with the ROM-free '-vr-probe'.");
+    cmd_line.error = true;
+  }
+  if (cmd_line.frame_game_diagnostic.enabled)
+    cmd_line.config.Set("VR", true);
 #endif
   return cmd_line;
 }
@@ -3305,6 +3515,9 @@ int main(int argc, char **argv)
   {
     return 1;
   }
+#ifdef SUPERMODEL_FRAME
+  s_frameGameDiagnostic = cmd_line.frame_game_diagnostic;
+#endif
 
   if (loadGUI) {
       // Load up what settings we have so far. The complete file is passed to the GUI,
@@ -3362,6 +3575,10 @@ int main(int argc, char **argv)
       )
   {
     ErrorLog("No ROM file specified.");
+#ifdef SUPERMODEL_FRAME
+    if (cmd_line.frame_game_diagnostic.enabled)
+      return 1;
+#endif
     return 0;
   }
 

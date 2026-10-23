@@ -63,6 +63,13 @@ if grep -Fx -- '-vr' "$STUB_ARGS_FILE" >/dev/null; then
   exit 1
 fi
 
+"$APP/run-frame.sh" "$ROM" -vr-game-diagnostic -vr-game-diagnostic-yaw=90 -vr-game-diagnostic-seconds=75
+grep -Fx -- '-vr' "$STUB_ARGS_FILE" >/dev/null
+grep -Fx -- '-vr-game-diagnostic' "$STUB_ARGS_FILE" >/dev/null
+grep -Fx -- '-vr-game-diagnostic-yaw=90' "$STUB_ARGS_FILE" >/dev/null
+grep -Fx -- '-vr-game-diagnostic-seconds=75' "$STUB_ARGS_FILE" >/dev/null
+grep -Fx -- "$ROM" "$STUB_ARGS_FILE" >/dev/null
+
 mkdir -p "$PERSIST/ROMs"
 cp "$ROM" "$PERSIST/ROMs/lostwsga.zip"
 "$APP/run-frame.sh" -show-fps

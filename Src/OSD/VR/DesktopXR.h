@@ -28,6 +28,9 @@
 #include <thread>
 #include <vector>
 
+#ifdef SUPERMODEL_FRAME
+#include "OSD/VR/FrameViewGesture.h"
+#endif
 #include "Graphics/New3D/VRHooks.h"
 
 struct DesktopXRInput
@@ -44,6 +47,9 @@ struct DesktopXRInput
   bool thumbClick[2] = {false, false};
   bool buttonA = false, buttonB = false, buttonX = false, buttonY = false;
   bool menu = false;
+#ifdef SUPERMODEL_FRAME
+  bool viewTap = false, viewHold = false;
+#endif
 
   // Controller rays (local space, metres) and where they hit the options menu (0..1, y down).
   bool       rayValid[2] = {false, false};
@@ -63,9 +69,14 @@ public:
     bool  positionalTracking = true;  // false = rotation + IPD only
     float hudDistance        = 20.0f; // metres from the origin to the 2D/HUD plane (far, so it
                                       // matches the depth of the 3D world: no double vision)
-    float resolutionScale    = 1.0f;  // multiplier on the runtime's recommended eye size
+    float resolutionScale    = 1.0f;  // multiplier on the eye target (runtime recommendation on PC)
+#ifdef SUPERMODEL_FRAME
+    int   maxEyeWidth        = 2160;  // Steam Frame target, capped by the runtime's maximum
+    float refreshHz          = 72.0f; // standalone gameplay default; config can request a higher supported rate
+#else
     int   maxEyeWidth        = 1664;  // cap (Virtual Desktop can recommend 2500+ px per eye)
     float refreshHz          = 1000.0f; // headset refresh: the highest rate offered up to this, 0 = runtime default
+#endif
     bool  threadedWait       = true;   // xrWaitFrame on its own thread (emulator never waits)
     bool  hudInEye           = true;   // draw the 2D layers into the eye images (exact registration
                                        // with the 3D) instead of a separate compositor quad layer
@@ -87,6 +98,10 @@ public:
 #ifdef SUPERMODEL_FRAME
     bool  colorProbe         = false;  // create only the OpenXR eye swapchains; no game-side assets/actions
     bool  forceProbeRender   = false;  // probe-only off-head diagnostic; never changes gameplay rendering
+    bool  gameDiagnostic     = false;  // bounded opt-in off-head game/render diagnostic
+    int   diagnosticYaw      = 0;      // fixed synthetic head/hand yaw: 0, 90, or 180 degrees
+    uint64_t diagnosticCaptureFrame = 1500;
+    unsigned diagnosticSeconds = 120;
 #endif
   };
 
@@ -141,6 +156,9 @@ public:
   void Recenter();
 
   const DesktopXRInput& Input() const { return m_input; }
+#ifdef SUPERMODEL_FRAME
+  bool FrameViewProfileActive() const { return m_frameViewProfileActive; }
+#endif
 
   // New3D::IVRFrameTarget
   int   EyeCount() const override { return 2; }
@@ -176,6 +194,27 @@ public:
   int EyeWidth()  const { return m_eyes[0].width; }
   int EyeHeight() const { return m_eyes[0].height; }
 #ifdef SUPERMODEL_FRAME
+  struct GameDiagnosticStats
+  {
+    uint64_t endFrames = 0;
+    uint64_t endFrameFailures = 0;
+    uint64_t shouldRenderFrames = 0;
+    uint64_t standbyFrames = 0;
+    uint64_t forcedFrames = 0;
+    uint64_t projectionFrames = 0;
+    uint64_t waitFrameFailures = 0;
+    uint64_t viewCountFailures = 0;
+    uint64_t xrErrors = 0;
+    uint64_t graphicsErrors = 0;
+    uint64_t syntheticPoseFrames = 0;
+    uint64_t capturedGameFrame = 0;
+    uint32_t lastSubmittedLayers = 0;
+    int capturedModels = 0;
+    bool captured = false;
+  };
+  void SetDiagnosticSourceFrame(uint64_t gameFrame) { m_diagnosticSourceFrame = gameFrame; }
+  bool DiagnosticCaptured() const { return m_gameDiagStats.captured; }
+  const GameDiagnosticStats& DiagnosticStats() const { return m_gameDiagStats; }
   struct ProbeStats
   {
     uint64_t frames = 0;
@@ -210,6 +249,7 @@ private:
 
   bool Fail(const std::string& what);
   bool Check(XrResult r, const char* what);
+  bool FrameRenderAllowed() const;
   bool LoadLoader();
   bool CreateInstance();
   bool CreateSession();
@@ -232,6 +272,10 @@ private:
   void DrawVignette(const New3D::VREye& eye);
   void DrawCinemaInEye(const New3D::VREye& eye);
   void DrawHandGuns(const New3D::VREye& eye);
+#ifdef SUPERMODEL_FRAME
+  bool WriteGameDiagnosticCapture();
+  void SetSyntheticDiagnosticPose();
+#endif
   bool HandMatrix(int hand, float m[16]) const;   // controller aim pose, world units
   int  EffectiveGunMode() const;
   void UpdateComfort();
@@ -290,6 +334,13 @@ private:
   XrAction m_aimPose = XR_NULL_HANDLE, m_trigger = XR_NULL_HANDLE, m_grip = XR_NULL_HANDLE;
   XrAction m_a = XR_NULL_HANDLE, m_b = XR_NULL_HANDLE, m_x = XR_NULL_HANDLE, m_y = XR_NULL_HANDLE;
   XrAction m_menu = XR_NULL_HANDLE, m_thumbClick = XR_NULL_HANDLE, m_haptic = XR_NULL_HANDLE;
+#ifdef SUPERMODEL_FRAME
+  XrAction m_view = XR_NULL_HANDLE;
+  bool m_frameInteractionEnabled = false;
+  bool m_frameViewProfileActive = false;
+  XrPath m_frameInteractionProfilePath = XR_NULL_PATH;
+  FrameViewGesture m_viewGesture;
+#endif
   XrPath   m_hands[2] = {XR_NULL_PATH, XR_NULL_PATH};  // 0 = right, 1 = left
   XrSpace  m_aimSpaces[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
   DesktopXRInput m_input;
@@ -301,6 +352,10 @@ private:
 #ifdef SUPERMODEL_FRAME
   ProbeStats m_probeStats;
   bool m_probeColorsLogged = false;
+  GameDiagnosticStats m_gameDiagStats;
+  uint64_t m_diagnosticSourceFrame = 0;
+  std::vector<uint8_t> m_gameDiagnosticPixels[2];
+  bool m_gameDiagnosticEyeCaptured[2] = {false, false};
 #endif
   New3D::VRScreenInfo m_screen;
   bool   m_hudOnHead = false;   // VRHudLock 2: current choice, switched after a short steady period
