@@ -40,11 +40,15 @@ camera zooms while leaving the emulator's already-consumed input snapshot unchan
 
 Lost World's wide calibration and input conversion are paired in code, including
 on installations without the old PC settings file. With wide calibration enabled,
-default X scale/offset are `0.5497 / 0.2162`, and Y are `0.5507 / 0.2155`; explicit
-settings still override them. With calibration disabled, defaults are identity.
-These are the existing PC calibration values, not an independently remeasured
-ROM hit response. `test-controller-aim.cpp` covers production quaternion/ray math,
-rolled hands, screen center/edges, depth, translation modes, and calibration values.
+default X scale/offset are `0.5497 / 0.22515`, centering the horizontal screen input
+at the game's `0x80` ADC value; Y remains `0.5507 / 0.2155`. Explicit settings still
+override them. With calibration disabled, defaults are identity. The measured X
+gain is retained, with its fallback offset anchored at center; this corrects the
+observed center sample without guessing the full calibration span. `test-controller-aim.cpp`
+covers production quaternion/ray math, rolled hands, screen center/edges, depth,
+translation modes, and calibration values. `test-lost-world-input-path.cpp` drives
+the actual SDL virtual mouse, a neutral joystick source, and analog-gun input classes
+to check the center ADC and horizontal direction through the production mapping path.
 
 The Game gun slot loads a private `VRGameGun.obj` first. If absent, the Frame Lost
 World build loads `FrameArcadeGun.obj`: the approved 17,108-triangle Namco Arcade
@@ -77,6 +81,25 @@ submission metadata. The first sample reads each unchanged FBO twice and fails
 on disagreement. The default remains one sample. These readbacks force GPU work
 and alter scheduling; they do not establish that ordinary presentation is free of
 flicker. Use the hold control to distinguish retained-state changes from animation.
+Requested eye captures also record actual viewport remaps and submitted mesh counts
+after the production visibility/material filters. Metadata includes original viewport
+rectangles/frusta, shader remap matrices, model addresses and material flags; detailed
+remapped draws are capped at 4096 per eye with an explicit omitted count, while summary
+counts remain complete. `remap_observed=0` means the observer did not run, not that no
+remaps occurred. This CPU-only observer adds no further GL readbacks and does not run
+on ordinary frames or in the authoritative flat pass. Submitted draws do not prove
+pixel visibility; correlate them with coverage captures before attributing holes.
+
+The triangle path corrects face normals only for the additional affine viewport
+remap: `C = R * inverse(A)^T * inverse(A) * R^T`, where `R` is eye rotation and
+`A` is the viewport remap. Applied to the existing face normal, this preserves
+the original Model 3 transform and cinema scale while keeping the remapped plane's
+culling/LOD value consistent across its interior. Lighting normals are unchanged;
+flat and unremapped views retain their original shader path. The real-GL
+`Scripts/frame/test-r3d-remap.sh` regression uses production `R3DShader` setters,
+requires the legacy path to lose plane interiors, and checks corrected asymmetric
+eyes, flat-state reset and cinema LOD scaling. Source correctness does not establish
+that a particular game's affected geometry uses remapping or resolve worn flicker.
 
 `SM_FRAME_DIAG_SKIP_GPU_WAIT=1` disables completion only in the color probe or game
 diagnostic. For matched no-readback timing, set the capture frame to `1000000000`

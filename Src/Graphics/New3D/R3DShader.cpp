@@ -1,4 +1,5 @@
 #include "R3DShader.h"
+#include "VRFaceNormal.h"
 #include <cmath>
 #include "R3DShaderQuads.h"
 #include "R3DShaderTriangles.h"
@@ -147,6 +148,8 @@ bool R3DShader::LoadShader(const char* vertexShader, const char* fragmentShader)
 
 	m_locProjMat			= glGetUniformLocation(m_shaderProgram, "projMat");
 	m_locModelMat			= glGetUniformLocation(m_shaderProgram, "modelMat");
+	m_locVRCorrectFaceNormals = glGetUniformLocation(m_shaderProgram, "vrCorrectFaceNormals");
+	m_locVRFaceNormalCorrection = glGetUniformLocation(m_shaderProgram, "vrFaceNormalCorrection");
 
 	m_locHardwareStep		= glGetUniformLocation(m_shaderProgram, "hardwareStep");
 	m_locDiscardAlpha		= glGetUniformLocation(m_shaderProgram, "discardAlpha");
@@ -383,6 +386,15 @@ void R3DShader::SetViewportUniforms(const Viewport *vp)
 			m_vrRemap[15] = 1.0f;
 			m_vrRemapOn = true;
 		}
+	}
+
+	// This affine map aligns viewport projections; it must not bend the face plane used
+	// for culling/LOD. Leave lighting and the original Model 3 normal semantics alone.
+	if (m_locVRCorrectFaceNormals >= 0) {
+		float correction[9];
+		const bool correct = m_vrRemapOn && VRFaceNormalCorrection(m_vrRemap, m_vrEye->view, correction);
+		glUniform1i(m_locVRCorrectFaceNormals, correct);
+		if (correct) glUniformMatrix3fv(m_locVRFaceNormalCorrection, 1, GL_FALSE, correction);
 	}
 
 	if (m_vrApply) {

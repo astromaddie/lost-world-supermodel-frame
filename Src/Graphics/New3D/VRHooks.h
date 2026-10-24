@@ -17,6 +17,8 @@
 
 namespace New3D {
 
+struct VRRemapDiagnostic;
+
 struct VREye
 {
 	// Tangents of the eye FOV half-angles (OpenXR: tan(angleLeft) < 0, tan(angleRight) > 0,
@@ -104,6 +106,11 @@ public:
 	// Returns false to skip the eye.
 	virtual bool BeginEye(int eye, VREye& outEye) = 0;
 	virtual void EndEye(int eye) = 0;
+
+	// Optional diagnostic observer before layer compositing. Normal frame targets do no work.
+	virtual void CaptureSceneLayers(const VREye& eye, unsigned framebuffer) { (void)eye; (void)framebuffer; }
+	// Null outside requested captures. Observe actual submitted draws without additional GL reads.
+	virtual VRRemapDiagnostic* BeginSceneRemapCapture(const VREye& eye) { (void)eye; return nullptr; }
 
 	// Called once per drawn game frame, before the eyes.
 	virtual void SetScreen(const VRScreenInfo& info) { (void)info; }

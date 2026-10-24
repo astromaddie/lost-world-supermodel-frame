@@ -21,6 +21,7 @@ public:
 	void	SetModelStates		(const Model* model);
 	void	SetViewportUniforms	(const Viewport *vp);
 	void	SetVREye			(const VREye* eye) { m_vrEye = eye; m_vrApply = false; }	// nullptr = flat
+	const float* ActiveVRRemap() const { return m_vrApply && m_vrRemapOn ? m_vrRemap : nullptr; }
 	// Stereo: tangents of the whole screen as seen by the main 3D view. Other full-screen
 	// viewports with their own field of view (L.A. Machineguns draws its crosshair in a narrower
 	// one) are remapped onto it, so they land where they appear on the flat screen.
@@ -33,6 +34,8 @@ public:
 	void	SetLayer			(Layer layer);
 
 private:
+	GLint m_locVRCorrectFaceNormals = -1;
+	GLint m_locVRFaceNormalCorrection = -1;
 
 	void PrintShaderResult(GLuint shader);
 	void PrintProgramResult(GLuint program);

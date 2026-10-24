@@ -85,4 +85,16 @@ g++ -std=c++17 -Wall -Wextra -Werror "$ROOT/Scripts/frame/test-frame-view-gestur
 g++ -std=c++17 -Wall -Wextra -Werror -I "$ROOT/Src/Pkgs" "$ROOT/Scripts/frame/test-controller-aim.cpp" \
   -o "$TEST_ROOT/test-controller-aim"
 "$TEST_ROOT/test-controller-aim"
+Scripts/frame/test-lost-world-input-path.sh
+g++ -std=c++17 -Wall -Wextra -Werror -I "$ROOT/Src/Pkgs" "$ROOT/Scripts/frame/test-diagnostic-view-lock.cpp" \
+  -o "$TEST_ROOT/test-diagnostic-view-lock"
+"$TEST_ROOT/test-diagnostic-view-lock"
+g++ -std=c++17 -Wall -Wextra -Werror "$ROOT/Scripts/frame/test-remap-diagnostic.cpp" \
+  -o "$TEST_ROOT/test-remap-diagnostic"
+"$TEST_ROOT/test-remap-diagnostic"
+g++ -std=c++17 -Wall -Wextra -Werror "$ROOT/Scripts/frame/test-vr-face-normal.cpp" \
+  -o "$TEST_ROOT/test-vr-face-normal"
+"$TEST_ROOT/test-vr-face-normal"
+Scripts/frame/test-r3d-composite.sh
+Scripts/frame/test-r3d-remap.sh
 printf '%s\n' 'Frame native verification passed (no active OpenXR runtime expected on builder).'

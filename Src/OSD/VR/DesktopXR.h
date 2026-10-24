@@ -30,6 +30,8 @@
 
 #ifdef SUPERMODEL_FRAME
 #include "OSD/VR/FrameViewGesture.h"
+#include "OSD/VR/DiagnosticViewLock.h"
+#include "Graphics/New3D/VRRemapDiagnostic.h"
 #endif
 #include "Graphics/New3D/VRHooks.h"
 
@@ -164,6 +166,10 @@ public:
   int   EyeCount() const override { return 2; }
   bool  BeginEye(int eye, New3D::VREye& outEye) override;
   void  EndEye(int eye) override;
+#ifdef SUPERMODEL_FRAME
+  void CaptureSceneLayers(const New3D::VREye& eye, unsigned framebuffer) override;
+  New3D::VRRemapDiagnostic* BeginSceneRemapCapture(const New3D::VREye& eye) override;
+#endif
   float CullTangent() const override { return 100.f; }
   void  SetScreen(const New3D::VRScreenInfo& info) override;
   int   FlatViewCount() const override;
@@ -296,6 +302,10 @@ private:
 #ifdef SUPERMODEL_FRAME
   bool m_waitForGpu = true;
   bool m_diagnosticHoldScene = false;
+  DiagnosticViewLock m_diagnosticViewLock;
+  std::vector<unsigned char> m_diagnosticCoverage[2];
+  uint64_t m_diagnosticCoverageCounts[2][8] = {};
+  float m_diagnosticDepthRange[2][2] = {};
   unsigned m_diagnosticSamples = 1, m_diagnosticSample = 0;
   float m_diagnosticHandYaw = 0, m_diagnosticHandPitch = 0, m_diagnosticHandRoll = 0;
   std::vector<unsigned char> m_diagnosticBackdropPixels[2];
@@ -370,6 +380,7 @@ private:
   uint64_t m_diagnosticSourceFrame = 0;
   std::vector<uint8_t> m_gameDiagnosticPixels[2];
   bool m_gameDiagnosticEyeCaptured[2] = {false, false};
+  New3D::VRRemapDiagnostic m_diagnosticRemap[2];
 #endif
   New3D::VRScreenInfo m_screen;
   bool   m_hudOnHead = false;   // VRHudLock 2: current choice, switched after a short steady period

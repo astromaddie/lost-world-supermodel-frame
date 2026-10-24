@@ -20,6 +20,7 @@
  **/
 
 #include "New3D.h"
+#include "VRRemapDiagnostic.h"
 #include <array>
 #include "Vec.h"
 #include <cmath>
@@ -355,7 +356,7 @@ void CNew3D::DrawAmbientFog()
 	}
 }
 
-bool CNew3D::RenderScene(int priority, bool renderOverlay, Layer layer)
+bool CNew3D::RenderScene(int priority, bool renderOverlay, Layer layer, VRRemapDiagnostic* diagnostic)
 {
 	glActiveTexture(GL_TEXTURE0);
 	m_textureBank[0].Bind();
@@ -407,6 +408,34 @@ bool CNew3D::RenderScene(int priority, bool renderOverlay, Layer layer)
 				
 				m_r3dShader.SetMeshUniforms(&mesh);
 				glDrawArrays(m_primType, mesh.vboOffset, mesh.vertexCount);
+				if (diagnostic) {
+					// Record after every production filter, using the shader's actual transform.
+					const auto& vp = n.viewport;
+					VRRemapDiagnostic::Viewport view;
+					view.id = static_cast<unsigned>(&n - m_nodes.data());
+					view.priority = priority;
+					view.rect = {vp.vpX, vp.vpY, vp.vpWidth, vp.vpHeight};
+					view.frustum = {vp.angle_left, vp.angle_right, vp.angle_top, vp.angle_bottom};
+					const float* remap = m_r3dShader.ActiveVRRemap();
+					view.remapped = remap != nullptr;
+					for (int k = 0; k < 16; ++k) view.matrix[k] = remap ? remap[k] : (k % 5 == 0 ? 1.f : 0.f);
+					VRRemapDiagnostic::Draw draw;
+					draw.viewport = view.id;
+					draw.model = static_cast<unsigned>(&m - n.models.data());
+					draw.mesh = static_cast<unsigned>(&mesh - m.meshes->data());
+					draw.address = m.vrAddr;
+					draw.layer = static_cast<int>(layer);
+					draw.vertices = mesh.vertexCount;
+					draw.overlay = renderOverlay;
+					draw.dynamic = m.dynamic;
+					draw.alpha = m.alpha;
+					draw.material = unsigned(mesh.textured) | (unsigned(mesh.textureAlpha) << 1) |
+						(unsigned(mesh.alphaTest) << 2) | (unsigned(mesh.polyAlpha) << 3) |
+						(unsigned(mesh.layered) << 4) | (unsigned(mesh.noLosReturn) << 5);
+					draw.texture = {mesh.page ^ m.page, mesh.x, mesh.y, mesh.width, mesh.height,
+						mesh.format, m.textureOffsetX, m.textureOffsetY};
+					diagnostic->Record(view, draw);
+				}
 			}
 		}
 	}
@@ -687,6 +716,10 @@ void CNew3D::BuildScene(void)
 
 void CNew3D::DrawScene(R3DFrameBuffers& fb, bool processLos, GLuint target)
 {
+	VRRemapDiagnostic* diagnostic = nullptr;
+	if (m_vrEye) {
+		if (auto* vr = GetVRFrameTarget()) diagnostic = vr->BeginSceneRemapCapture(*m_vrEye);
+	}
 	// Viewport rectangles depend on the target (window or eye), so refresh them first;
 	// the fog passes below use them before RenderScene() does.
 	for (auto& n : m_nodes) {
@@ -716,7 +749,7 @@ void CNew3D::DrawScene(R3DFrameBuffers& fb, bool processLos, GLuint target)
 
 			m_r3dShader.DiscardAlpha(true);
 			m_r3dShader.SetLayer(Layer::colour);
-			bool hasOverlay = RenderScene(pri, renderOverlay, Layer::colour);
+			bool hasOverlay = RenderScene(pri, renderOverlay, Layer::colour, diagnostic);
 
 			if (processLos && !renderOverlay) {
 				ProcessLos(pri);
@@ -729,17 +762,21 @@ void CNew3D::DrawScene(R3DFrameBuffers& fb, bool processLos, GLuint target)
 			fb.StoreDepth();
 			m_r3dShader.SetLayer(Layer::trans1);
 			fb.SetFBO(Layer::trans1);
-			RenderScene(pri, renderOverlay, Layer::trans1);
+			RenderScene(pri, renderOverlay, Layer::trans1, diagnostic);
 
 			fb.RestoreDepth();
 			m_r3dShader.SetLayer(Layer::trans2);
 			fb.SetFBO(Layer::trans2);
-			RenderScene(pri, renderOverlay, Layer::trans2);
+			RenderScene(pri, renderOverlay, Layer::trans2, diagnostic);
 						
 			DisableRenderStates();
 
 			if (!hasOverlay) break;								// no high priority polys						
 		}
+	}
+
+	if (m_vrEye) {
+		if (auto* vr = GetVRFrameTarget()) vr->CaptureSceneLayers(*m_vrEye, fb.Framebuffer());
 	}
 
 	fb.SetFBO(Layer::none);

@@ -10,6 +10,8 @@ uniform float	modelScale;
 uniform float	nodeAlpha;
 uniform float	cota;
 uniform mat4	modelMat;
+uniform bool	vrCorrectFaceNormals;
+uniform mat3	vrFaceNormalCorrection;
 uniform mat4	projMat;
 uniform bool	translatorMap;
 
@@ -48,6 +50,7 @@ float CalcBackFace(in vec3 viewVertex)
 {
 	vec3 vt = viewVertex; // - vec3(0.0);
 	vec3 vn = mat3(modelMat) * inFaceNormal;
+	if (vrCorrectFaceNormals) vn = vrFaceNormalCorrection * vn;
 
 	// dot product of face normal with view direction
 	return dot(vt, vn);

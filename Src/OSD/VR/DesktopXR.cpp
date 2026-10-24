@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 
 // Supermodel's logger (OSD/Logger.h is not included: its INT64 typedef clashes with X11's).
 extern void InfoLog(const char *fmt, ...);
@@ -1569,6 +1570,8 @@ bool DesktopXR::BeginFrame()
     m_gameDiagnosticPixels[1].clear();
     m_diagnosticBackdropPixels[0].clear();
     m_diagnosticBackdropPixels[1].clear();
+    m_diagnosticRemap[0].Reset();
+    m_diagnosticRemap[1].Reset();
   }
 #endif
 
@@ -1751,15 +1754,18 @@ void DesktopXR::SetSyntheticDiagnosticPose()
   m_headPose.orientation = rotation;
   m_headPose.position = {0.f, 0.f, 0.f};
   m_input = DesktopXRInput{};
-  const float halfIpd = m_ipd * 0.5f;
   for (int eye = 0; eye < 2; ++eye) {
-    m_views[eye].pose.orientation = rotation;
-    m_views[eye].pose.position = Rotate(rotation, {eye == 0 ? -halfIpd : halfIpd, 0.f, 0.f});
     const XrFovf& f = m_views[eye].fov;
     if (!std::isfinite(f.angleLeft) || !std::isfinite(f.angleRight) ||
         !std::isfinite(f.angleUp) || !std::isfinite(f.angleDown) ||
         f.angleLeft >= 0.f || f.angleRight <= 0.f || f.angleUp <= 0.f || f.angleDown >= 0.f)
       m_views[eye].fov = {-0.785398163f, 0.785398163f, 0.785398163f, -0.785398163f};
+  }
+  m_diagnosticViewLock.Apply(m_diagnosticHoldScene, m_views, m_ipd);
+  const float halfIpd = m_ipd * 0.5f;
+  for (int eye = 0; eye < 2; ++eye) {
+    m_views[eye].pose.orientation = rotation;
+    m_views[eye].pose.position = Rotate(rotation, {eye == 0 ? -halfIpd : halfIpd, 0.f, 0.f});
   }
   for (int hand = 0; hand < 2; ++hand) {
     const XrVector3f offset{hand == 0 ? 0.24f : -0.24f, -0.16f, -0.42f};
@@ -2882,6 +2888,79 @@ void DesktopXR::EndEye(int eye)
 }
 
 #ifdef SUPERMODEL_FRAME
+New3D::VRRemapDiagnostic* DesktopXR::BeginSceneRemapCapture(const New3D::VREye& target)
+{
+  if (!m_config.gameDiagnostic || m_gameDiagStats.captured || !m_scene3D ||
+      m_diagnosticSourceFrame < m_config.diagnosticCaptureFrame || m_config.cinema ||
+      (target.fbo != m_curEye[0].fbo && target.fbo != m_curEye[1].fbo))
+    return nullptr;
+  auto& diagnostic = m_diagnosticRemap[target.fbo == m_curEye[0].fbo ? 0 : 1];
+  diagnostic.Reset();
+  diagnostic.observed = true;
+  return &diagnostic;
+}
+
+void DesktopXR::CaptureSceneLayers(const New3D::VREye& target, unsigned framebuffer)
+{
+  if (!m_config.gameDiagnostic || m_gameDiagStats.captured || !m_scene3D ||
+      m_diagnosticSourceFrame < m_config.diagnosticCaptureFrame)
+    return;
+  // Cinema flat-view targets also use DrawScene, but are not headset eye MRTs.
+  if (m_config.cinema || (target.fbo != m_curEye[0].fbo && target.fbo != m_curEye[1].fbo))
+    return;
+  const int eye = target.fbo == m_curEye[0].fbo ? 0 : 1;
+  auto& coverage = m_diagnosticCoverage[eye];
+  const size_t count = (size_t)target.width * (size_t)target.height;
+  coverage.assign(count, 0);
+  std::fill(std::begin(m_diagnosticCoverageCounts[eye]), std::end(m_diagnosticCoverageCounts[eye]), 0);
+  GLint readFbo, packBuffer, packAlignment, readBuffer;
+  glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &readFbo);
+  glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &packBuffer);
+  glGetIntegerv(GL_PACK_ALIGNMENT, &packAlignment);
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
+  glGetIntegerv(GL_READ_BUFFER, &readBuffer);
+  glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  bool clean = glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+  std::vector<unsigned char> rgba(count * 4);
+  for (int layer = 0; layer < 3 && clean; ++layer) {
+    glReadBuffer(GL_COLOR_ATTACHMENT0 + layer);
+    glReadPixels(0, 0, target.width, target.height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+    for (size_t p = 0; p < count; ++p) {
+      if (rgba[p*4+3] > 0) coverage[p] |= 1 << (layer*2);
+      if (rgba[p*4+3] == 255) coverage[p] |= 1 << (layer*2+1);
+    }
+  }
+  // Depth is from the last rendered priority/overlay, unlike the accumulated colour layers.
+  std::vector<float> depth(count);
+  if (clean) glReadPixels(0, 0, target.width, target.height, GL_DEPTH_COMPONENT, GL_FLOAT, depth.data());
+  float minimum = 1.f, maximum = 0.f;
+  for (size_t p = 0; p < count; ++p) {
+    if (!std::isfinite(depth[p])) coverage[p] |= 128;
+    else if (depth[p] > 0.f) {
+      coverage[p] |= 64;
+      minimum = std::min(minimum, depth[p]); maximum = std::max(maximum, depth[p]);
+    }
+    for (int bit = 0; bit < 8; ++bit)
+      if (coverage[p] & (1 << bit)) ++m_diagnosticCoverageCounts[eye][bit];
+  }
+  m_diagnosticDepthRange[eye][0] = maximum > 0.f ? minimum : 0.f;
+  m_diagnosticDepthRange[eye][1] = maximum;
+  glReadBuffer(readBuffer);
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, readFbo);
+  glBindBuffer(GL_PIXEL_PACK_BUFFER, packBuffer);
+  glPixelStorei(GL_PACK_ALIGNMENT, packAlignment);
+  for (GLenum error = glGetError(); error != GL_NO_ERROR; error = glGetError()) {
+    clean = false;
+    ++m_gameDiagStats.graphicsErrors;
+    InfoLog("VR game diagnostic: scene layer GL error 0x%x eye %d", error, eye);
+  }
+  if (!clean) {
+    coverage.clear();
+    ++m_gameDiagStats.graphicsErrors;
+  }
+}
+
 bool DesktopXR::CaptureDiagnosticEye(int eye, std::vector<unsigned char>& pixels, bool validateObserver)
 {
   bool clean = true;
@@ -2958,8 +3037,32 @@ bool DesktopXR::WriteGameDiagnosticCapture()
       }
     }
   }
+  for (int eye = 0; eye < 2; ++eye) {
+    if (m_diagnosticCoverage[eye].empty()) {
+      if (!m_config.cinema) return false;
+      continue;
+    }
+    std::ofstream mask(std::string(paths[eye]) + ".coverage.pgm", std::ios::binary);
+    mask << "P5\n" << widths[eye] << ' ' << heights[eye] << "\n255\n";
+    for (int y = heights[eye] - 1; y >= 0; --y)
+      mask.write(reinterpret_cast<const char*>(m_diagnosticCoverage[eye].data() + (size_t)y * widths[eye]), widths[eye]);
+    mask.close();
+    if (!mask) return false;
+  }
   std::ofstream metadata(metadataPath);
-  metadata << "sample=" << m_diagnosticSample << '\n'
+  metadata << std::setprecision(9)
+           << "fov_ipd_locked=" << (m_diagnosticViewLock.locked ? "true" : "false") << '\n'
+           << "ipd=" << m_ipd << '\n'
+           << "game_frustum_lrtb=" << m_gameL << ',' << m_gameR << ',' << m_gameT << ',' << m_gameB << '\n'
+           << "source_frustum_lrtb=" << m_screen.left << ',' << m_screen.right << ',' << m_screen.top << ',' << m_screen.bottom << '\n'
+           << "coverage_bits=alpha0_nonzero,alpha0_opaque,alpha1_nonzero,alpha1_opaque,alpha2_nonzero,alpha2_opaque,depth_nonzero,depth_nonfinite\n"
+           << "depth_scope=last_rendered_priority_overlay\n"
+           << "remap_scope=submitted_meshes_after_scene_filters_not_pixel_visibility\n"
+           << "remap_count_fields=viewports,remapped_viewports,models,remapped_models,draws,remapped_draws,remapped_opaque_draws,remapped_vertices\n"
+           << "remap_viewport_fields=id,priority,remapped,x,y,width,height,left,right,top,bottom,matrix_column_major_16\n"
+           << "remap_draw_fields=viewport,model,mesh,address_decimal,layer,overlay,dynamic,vertices,node_alpha,material_bits,page,x,y,width,height,format,model_offset_x,model_offset_y\n"
+           << "remap_material_bits=textured,texture_alpha,alpha_test,poly_alpha,layered,no_los_return\n"
+           << "sample=" << m_diagnosticSample << '\n'
            << "hold_scene=" << (m_diagnosticHoldScene ? "true" : "false") << '\n'
            << "new_game_frame=" << (m_screen.cameraTurn >= 0 ? "true" : "false") << '\n'
            << "gpu_completion_wait=" << (m_waitForGpu ? "true" : "false") << '\n'
@@ -2984,6 +3087,14 @@ bool DesktopXR::WriteGameDiagnosticCapture()
            << "submitted_layer_count=" << m_gameDiagStats.lastSubmittedLayers << '\n'
            << "projection_layer_submitted=true\n"
            << "xr_end_frame=succeeded\n";
+  for (int eye = 0; eye < 2; ++eye) {
+    const auto& f = m_views[eye].fov;
+    metadata << "eye" << eye << "_fov_lrud=" << f.angleLeft << ',' << f.angleRight << ',' << f.angleUp << ',' << f.angleDown << '\n'
+             << "eye" << eye << "_coverage_counts=";
+    for (int bit = 0; bit < 8; ++bit) metadata << (bit ? "," : "") << m_diagnosticCoverageCounts[eye][bit];
+    metadata << '\n' << "eye" << eye << "_depth_minmax=" << m_diagnosticDepthRange[eye][0] << ',' << m_diagnosticDepthRange[eye][1] << '\n';
+    m_diagnosticRemap[eye].Write(metadata, eye);
+  }
   for (int hand = 0; hand < 2; ++hand) {
     const auto& p = m_handPose[hand];
     const auto& ray = m_input.rayDir[hand];

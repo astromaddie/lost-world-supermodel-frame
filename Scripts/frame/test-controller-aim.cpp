@@ -95,9 +95,9 @@ static void TestFrustumChange()
 static void TestLostWorldCalibration()
 {
   const auto wide=ControllerAim::LostWorldMapping(true), native=ControllerAim::LostWorldMapping(false);
-  // Measured PC calibration fixtures, independent of the production constants.
+  // X follows the production input-path center regression; Y retains the PC measurements.
   const float screen[]={0,0.5f,1};
-  const float gunX[]={0.2162f,0.49105f,0.7659f},gunY[]={0.2155f,0.49085f,0.7662f};
+  const float gunX[]={0.22515f,0.5f,0.77485f},gunY[]={0.2155f,0.49085f,0.7662f};
   for(int i=0;i<3;i++) {
     assert(Near(screen[i]*wide.scaleX+wide.offsetX,gunX[i]));
     assert(Near(screen[i]*wide.scaleY+wide.offsetY,gunY[i]));

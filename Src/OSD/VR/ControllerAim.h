@@ -62,11 +62,12 @@ inline bool ProjectPointer(const XrVector3f& origin, const XrVector3f& direction
 }
 
 // Measured Lost World screen-to-gun conversion paired with the 0x123C wide
-// calibration below. Previously these lived only in the optional PC settings file.
+// calibration below. The measured horizontal gain is retained, with its fallback
+// offset centered so a neutral screen point yields the Model 3 ADC center.
 struct GunMapping { float scaleX, offsetX, scaleY, offsetY; };
 inline GunMapping LostWorldMapping(bool wide)
 {
-  return wide ? GunMapping{0.5497f, 0.2162f, 0.5507f, 0.2155f}
+  return wide ? GunMapping{0.5497f, 0.22515f, 0.5507f, 0.2155f}
               : GunMapping{1.f, 0.f, 1.f, 0.f};
 }
 }

@@ -20,6 +20,7 @@ public:
 
 	void	BindTexture(Layer layer);
 	void	SetFBO(Layer layer);
+	unsigned Framebuffer() const { return m_frameBufferID; }
 	void	StoreDepth();
 	void	RestoreDepth();
 
