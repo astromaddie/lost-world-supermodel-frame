@@ -138,7 +138,9 @@ The build uses two jobs, creates separate `objframe/` and `binframe/` outputs, a
 
 The three stereo runs used fixed synthetic head/hand poses and explicitly forced rendering during standby. Their projection-frame counts were 4529, 4535 and 4530 respectively; each included one original `shouldRender=true` frame. This verifies the native game/render/submission path. Physical aiming, control ergonomics and optical stereo require separate interactive checks.
 
-Separate 90-second runs used the same bounded Coin/Start stimulus and no eye readback (capture frame set to 1000000000). At 2160x2160 and a 120 Hz preference, sustained gameplay fell to roughly 33-37 display/emulation FPS with about 27-30 ms GPU time. At 1080x1080 with the mirror enabled, gameplay held 60 emulation FPS but display cadence settled near 60 FPS. With 1080x1080, the mirror disabled and SteamVR set to 72 Hz, eight five-second gameplay intervals measured 71.9-72.2 display FPS and 59.8-60.2 emulation FPS. These are opening-gameplay samples rather than a full-game performance survey. The no-capture runs intentionally reached the diagnostic timeout; all recorded zero XR/OpenGL errors.
+### Earlier stereo timing
+
+Separate 90-second runs of the initial stereo implementation used the same bounded Coin/Start stimulus and no eye readback (capture frame set to 1000000000). At 2160x2160 and a 120 Hz preference, sustained gameplay fell to roughly 33-37 display/emulation FPS with about 27-30 ms GPU time. At 1080x1080 with the mirror enabled, gameplay held 60 emulation FPS but display cadence settled near 60 FPS. With 1080x1080, the mirror disabled and SteamVR set to 72 Hz, eight five-second gameplay intervals measured 71.9-72.2 display FPS and 59.8-60.2 emulation FPS. These are opening-gameplay samples rather than a full-game performance survey. The no-capture runs intentionally reached the diagnostic timeout; all recorded zero XR/OpenGL errors.
 
 The runtime's `predictedDisplayPeriod` sometimes continued to report 120 Hz during the 72 Hz run, while the compositor logged its 72 Hz mode selection and the app submitted about 72 frames per second. The timing log therefore labels this field `runtimePeriod`, separately from measured display and emulation cadence.
 
@@ -147,3 +149,18 @@ The rebuilt default profile was then launched with the original configuration re
 On Mesa/Zink, querying freshly generated GPU timer-query names produced four startup `GL_INVALID_OPERATION` errors. The timer now polls only slots containing a previously ended query and consumes each available result before reuse. The same diagnostic runs with `MESA_DEBUG=context` confirmed the startup errors were eliminated.
 
 No new menu layout is introduced. The existing upstream PC input and display behavior remains available outside the Frame build.
+
+### Resolution comparison on 89f72bf (2026-10-24)
+
+Six 115-second Steam launches alternated 1080x1080 and 2160x2160 eyes, three runs each. Every run loaded the same attract snapshot and baseline NVRAM, with Coin at 12 seconds and Start at 13.5 seconds. Desktop mirroring remained off, the app requested 72 Hz, and the normal GPU completion wait remained enabled. The SteamVR refresh preference was unchanged; its reported display period varied under load.
+
+The diagnostic forced rendering during standby with fixed synthetic poses. Timed runs set the capture frame to 1000000000, avoiding eye readbacks and deliberately ending at the timeout. A separate capture at game frame 2000 verified the opening jungle/jeep scene. Approximate cumulative emulation progress selected the first 3D sequence near frames 2000-3000: windows 8-10 at 1080 and 8-12 at 2160. The alignment uses rounded five-second telemetry rather than an exact frame replay.
+
+Values below are medians of the three run medians; parentheses show the range across those run medians. GPU times summarize five-second averages, rather than individual-frame percentiles.
+
+| Per-eye resolution | App submissions/s | Emulation frames/s | GPU time (ms) |
+| --- | --- | --- | --- |
+| 1080x1080 (0.5x) | 42.9 (42.9-43.5) | 59.2 (58.3-59.7) | 11.4 (11.4-11.5) |
+| 2160x2160 (1.0x) | 25.6 (25.3-25.8) | 34.7 (34.5-36.0) | 25.3 (25.3-25.6) |
+
+Full resolution used about 2.22 times the GPU time and reduced app submission rate by 40.3% in this sequence. Both settings fell below 72 submissions/s. All six runs recorded zero OpenXR/OpenGL errors. Temperature samples were partial and GPU clocks were not recorded, so these measurements establish repeatability of the observed sequence without establishing sustained thermal behavior or temporal rendering correctness. The local `dist/device-evidence/RESOLUTION-BENCHMARK.json` retains all 132 timing windows, selection rules, source/binary identity, and restoration checks.

@@ -26,4 +26,6 @@ For the normal Frame profile, trigger fires, gun-hand squeeze reloads, right A/Y
 
 The standalone defaults are 1080x1080 per eye (0.5x render scale), a 72 Hz request, and desktop mirroring off. The existing render-resolution option can raise the scale to 1.0x for 2160x2160 eyes on the next launch. `VRRefreshHz` and `VRMirror` remain configurable in `Config/Supermodel.ini`; SteamVR's per-application refresh preference determines which rates it offers.
 
+On Frame, the eye size is the absolute `VRMaxEyeWidth` target (2160 by default) multiplied by `VRResolutionScale` in each dimension, capped by the runtime's maximum image size. Thus a 2160 target with scale 0.5 renders 1080x1080 per eye, with one quarter of the pixels of scale 1.0. The 3D renderer draws directly at that eye size; the flat window's `-res=992,768` does not limit the eye buffers. Original arcade textures and 2D layers retain their own source detail. Check the startup log's `eyes WxH` field for the actual allocated resolution.
+
 Build reproduction and current renderer/frame-gate notes are in `VR_ARCHITECTURE.md`. `BUILD-METADATA.json` records source/tree and toolchain identities; `SHA256SUMS` covers each shipped file.
