@@ -97,4 +97,5 @@ g++ -std=c++17 -Wall -Wextra -Werror "$ROOT/Scripts/frame/test-vr-face-normal.cp
 "$TEST_ROOT/test-vr-face-normal"
 Scripts/frame/test-r3d-composite.sh
 Scripts/frame/test-r3d-remap.sh
+Scripts/frame/test-r3d-empty-transparency.sh
 printf '%s\n' 'Frame native verification passed (no active OpenXR runtime expected on builder).'

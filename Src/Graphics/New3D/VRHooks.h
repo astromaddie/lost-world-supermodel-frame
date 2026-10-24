@@ -13,6 +13,7 @@
 // OpenGL view space: +X right, +Y up, -Z forward -- the same convention OpenXR uses.
 // So head tracking is simply: modelMat' = eyeView * modelMat.
 
+#include <cstdint>
 #include <vector>
 
 namespace New3D {
@@ -39,6 +40,23 @@ struct VREye
 	unsigned fbo	= 0;
 	int width		= 0;
 	int height		= 0;
+};
+
+// CPU-only scene traversal totals, active only during the bounded Frame game
+// diagnostic. These describe production render calls and skipped depth blits.
+struct VRTranslucencyStats
+{
+	std::uint64_t candidateGroups = 0;
+	std::uint64_t trans1Groups = 0;
+	std::uint64_t trans2Groups = 0;
+	std::uint64_t trans1Draws = 0;
+	std::uint64_t trans1Vertices = 0;
+	std::uint64_t trans2Draws = 0;
+	std::uint64_t trans2Vertices = 0;
+	std::uint64_t skippedTrans1Passes = 0;
+	std::uint64_t skippedTrans2Passes = 0;
+	std::uint64_t depthBlitsIssued = 0;
+	std::uint64_t depthBlitsAvoided = 0;
 };
 
 // What the renderer knows about this frame's screen, handed to the frame target before the eyes
@@ -111,6 +129,14 @@ public:
 	virtual void CaptureSceneLayers(const VREye& eye, unsigned framebuffer) { (void)eye; (void)framebuffer; }
 	// Null outside requested captures. Observe actual submitted draws without additional GL reads.
 	virtual VRRemapDiagnostic* BeginSceneRemapCapture(const VREye& eye) { (void)eye; return nullptr; }
+	// Frame-only render diagnostic controls. Other targets preserve legacy behavior by default.
+	virtual bool GameDiagnosticActive() const { return false; }
+	virtual bool ForceLegacyTranslucency() const { return false; }
+	virtual int DiagnosticEyeIndex(const VREye& eye) const { (void)eye; return -1; }
+	virtual void RecordTranslucencyStats(const VRTranslucencyStats& stats, int eye, bool flat, bool subview)
+	{
+		(void)stats; (void)eye; (void)flat; (void)subview;
+	}
 
 	// Called once per drawn game frame, before the eyes.
 	virtual void SetScreen(const VRScreenInfo& info) { (void)info; }

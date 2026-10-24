@@ -27,6 +27,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdlib>
 #include <cmath>
 #include <cstdio>
@@ -355,8 +356,14 @@ bool DesktopXR::Init(const Config& config)
     m_diagnosticHandYaw = number("SM_FRAME_DIAG_HAND_YAW", 0, -180, 180);
     m_diagnosticHandPitch = number("SM_FRAME_DIAG_HAND_PITCH", 0, -90, 90);
     m_diagnosticHandRoll = number("SM_FRAME_DIAG_HAND_ROLL", 0, -180, 180);
+    const char* legacyTranslucency = std::getenv("SM_FRAME_DIAG_LEGACY_TRANSLUCENCY");
+    m_diagnosticLegacyTranslucency = legacyTranslucency && std::strcmp(legacyTranslucency, "1") == 0;
+    m_translucencyDiagnosticLastLog = std::chrono::steady_clock::now();
+    m_translucencyDiagnosticStarted = true;
     InfoLog("VR game diagnostic: %u consecutive display samples, hand yaw/pitch/roll=%.1f/%.1f/%.1f; readbacks alter GPU scheduling",
             m_diagnosticSamples, m_diagnosticHandYaw, m_diagnosticHandPitch, m_diagnosticHandRoll);
+    InfoLog("VR game diagnostic: empty-translucency path %s (SM_FRAME_DIAG_LEGACY_TRANSLUCENCY=1 selects legacy)",
+            m_diagnosticLegacyTranslucency ? "legacy" : "optimized");
   }
 #endif
   if (!LoadLoader() || !CreateInstance() || !CreateSession())
@@ -2900,6 +2907,78 @@ New3D::VRRemapDiagnostic* DesktopXR::BeginSceneRemapCapture(const New3D::VREye& 
   return &diagnostic;
 }
 
+int DesktopXR::DiagnosticEyeIndex(const New3D::VREye& eye) const
+{
+  if (eye.fbo == m_curEye[0].fbo) return 0;
+  if (eye.fbo == m_curEye[1].fbo) return 1;
+  return -1;
+}
+
+void DesktopXR::RecordTranslucencyStats(const New3D::VRTranslucencyStats& stats, int eye,
+                                        bool flat, bool subview)
+{
+  if (!m_config.gameDiagnostic) return;
+
+  const unsigned category = subview ? 2u : (flat ? 1u : 0u);
+  TranslucencyDiagnosticBucket& bucket = m_translucencyDiagnostic[category];
+  auto& total = bucket.stats;
+  total.candidateGroups += stats.candidateGroups;
+  total.trans1Groups += stats.trans1Groups;
+  total.trans2Groups += stats.trans2Groups;
+  total.trans1Draws += stats.trans1Draws;
+  total.trans1Vertices += stats.trans1Vertices;
+  total.trans2Draws += stats.trans2Draws;
+  total.trans2Vertices += stats.trans2Vertices;
+  total.skippedTrans1Passes += stats.skippedTrans1Passes;
+  total.skippedTrans2Passes += stats.skippedTrans2Passes;
+  total.depthBlitsIssued += stats.depthBlitsIssued;
+  total.depthBlitsAvoided += stats.depthBlitsAvoided;
+  if (category == 0 && eye >= 0 && eye < 2) bucket.eyeMask |= 1u << eye;
+
+  if (!m_translucencyDiagnosticHasFrames) {
+    m_translucencyDiagnosticFirstFrame = m_diagnosticSourceFrame;
+    m_translucencyDiagnosticHasFrames = true;
+  }
+  m_translucencyDiagnosticLastFrame = m_diagnosticSourceFrame;
+  FlushTranslucencyDiagnostic(false);
+}
+
+void DesktopXR::FlushTranslucencyDiagnostic(bool force)
+{
+  if (!m_config.gameDiagnostic || !m_translucencyDiagnosticStarted) return;
+  const auto now = std::chrono::steady_clock::now();
+  if (!force && now - m_translucencyDiagnosticLastLog < std::chrono::seconds(5)) return;
+
+  const char* names[3] = {"eyes", "flat", "subview"};
+  for (unsigned i = 0; i < 3; ++i) {
+    const auto& b = m_translucencyDiagnostic[i];
+    const auto& s = b.stats;
+    if (s.candidateGroups == 0 && s.depthBlitsIssued == 0 && s.depthBlitsAvoided == 0) continue;
+    InfoLog("[vr-perf] translucency mode=%s sourceFrames=%llu-%llu category=%s eyes=0x%x groups=%llu trans1Groups=%llu trans1Draws=%llu trans1Vertices=%llu trans2Groups=%llu trans2Draws=%llu trans2Vertices=%llu skipped=%llu/%llu depthBlits=%llu avoided=%llu",
+            m_diagnosticLegacyTranslucency ? "legacy" : "optimized",
+            (unsigned long long)m_translucencyDiagnosticFirstFrame,
+            (unsigned long long)m_translucencyDiagnosticLastFrame,
+            names[i], b.eyeMask,
+            (unsigned long long)s.candidateGroups,
+            (unsigned long long)s.trans1Groups,
+            (unsigned long long)s.trans1Draws,
+            (unsigned long long)s.trans1Vertices,
+            (unsigned long long)s.trans2Groups,
+            (unsigned long long)s.trans2Draws,
+            (unsigned long long)s.trans2Vertices,
+            (unsigned long long)s.skippedTrans1Passes,
+            (unsigned long long)s.skippedTrans2Passes,
+            (unsigned long long)s.depthBlitsIssued,
+            (unsigned long long)s.depthBlitsAvoided);
+  }
+  for (auto& bucket : m_translucencyDiagnostic) {
+    bucket = TranslucencyDiagnosticBucket{};
+  }
+  m_translucencyDiagnosticFirstFrame = m_translucencyDiagnosticLastFrame;
+  m_translucencyDiagnosticHasFrames = false;
+  m_translucencyDiagnosticLastLog = now;
+}
+
 void DesktopXR::CaptureSceneLayers(const New3D::VREye& target, unsigned framebuffer)
 {
   if (!m_config.gameDiagnostic || m_gameDiagStats.captured || !m_scene3D ||
@@ -3000,6 +3079,7 @@ bool DesktopXR::CaptureDiagnosticEye(int eye, std::vector<unsigned char>& pixels
 
 bool DesktopXR::WriteGameDiagnosticCapture()
 {
+  FlushTranslucencyDiagnostic(true);
   const int widths[2] = {m_eyes[0].width, m_eyes[1].width};
   const int heights[2] = {m_eyes[0].height, m_eyes[1].height};
   if (m_gameDiagnosticPixels[0].empty() || m_gameDiagnosticPixels[1].empty())

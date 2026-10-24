@@ -23,6 +23,8 @@ public:
 	unsigned Framebuffer() const { return m_frameBufferID; }
 	void	StoreDepth();
 	void	RestoreDepth();
+	void	UseStoredDepthAttachment();
+	void	UseOriginalDepthAttachment();
 
 private:
 
@@ -40,6 +42,7 @@ private:
 	GLuint m_frameBufferIDCopy;
 	GLuint m_renderBufferIDCopy;
 	Layer m_lastLayer;
+	bool m_usingStoredDepth;
 	int m_width;
 	int m_height;
 

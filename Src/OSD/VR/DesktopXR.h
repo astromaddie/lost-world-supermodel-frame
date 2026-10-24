@@ -21,6 +21,7 @@
 #include <GL/glew.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
@@ -169,6 +170,10 @@ public:
 #ifdef SUPERMODEL_FRAME
   void CaptureSceneLayers(const New3D::VREye& eye, unsigned framebuffer) override;
   New3D::VRRemapDiagnostic* BeginSceneRemapCapture(const New3D::VREye& eye) override;
+  bool GameDiagnosticActive() const override { return m_config.gameDiagnostic; }
+  bool ForceLegacyTranslucency() const override { return m_config.gameDiagnostic && m_diagnosticLegacyTranslucency; }
+  int DiagnosticEyeIndex(const New3D::VREye& eye) const override;
+  void RecordTranslucencyStats(const New3D::VRTranslucencyStats& stats, int eye, bool flat, bool subview) override;
 #endif
   float CullTangent() const override { return 100.f; }
   void  SetScreen(const New3D::VRScreenInfo& info) override;
@@ -287,6 +292,7 @@ private:
 #ifdef SUPERMODEL_FRAME
   bool WriteGameDiagnosticCapture();
   void SetSyntheticDiagnosticPose();
+  void FlushTranslucencyDiagnostic(bool force);
 #endif
   bool HandMatrix(int hand, float m[16]) const;   // controller aim pose, world units
   int  EffectiveGunMode() const;
@@ -302,6 +308,7 @@ private:
 #ifdef SUPERMODEL_FRAME
   bool m_waitForGpu = true;
   bool m_diagnosticHoldScene = false;
+  bool m_diagnosticLegacyTranslucency = false;
   DiagnosticViewLock m_diagnosticViewLock;
   std::vector<unsigned char> m_diagnosticCoverage[2];
   uint64_t m_diagnosticCoverageCounts[2][8] = {};
@@ -309,6 +316,17 @@ private:
   unsigned m_diagnosticSamples = 1, m_diagnosticSample = 0;
   float m_diagnosticHandYaw = 0, m_diagnosticHandPitch = 0, m_diagnosticHandRoll = 0;
   std::vector<unsigned char> m_diagnosticBackdropPixels[2];
+  struct TranslucencyDiagnosticBucket
+  {
+    New3D::VRTranslucencyStats stats;
+    unsigned eyeMask = 0;
+  };
+  TranslucencyDiagnosticBucket m_translucencyDiagnostic[3]; // eyes, flat, subview
+  std::chrono::steady_clock::time_point m_translucencyDiagnosticLastLog{};
+  uint64_t m_translucencyDiagnosticFirstFrame = 0;
+  uint64_t m_translucencyDiagnosticLastFrame = 0;
+  bool m_translucencyDiagnosticHasFrames = false;
+  bool m_translucencyDiagnosticStarted = false;
   bool CaptureDiagnosticEye(int eye, std::vector<unsigned char>& pixels, bool validateObserver);
 #endif
   std::string m_error;

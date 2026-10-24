@@ -31,6 +31,7 @@
 #include <unordered_map>
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <GL/glew.h>
 #include "Types.h"
 #include "Graphics/IRender3D.h"
@@ -228,7 +229,19 @@ private:
 	void CopyVertexData(const R3DPoly& r3dPoly, std::vector<FVertex>& vertexArray);
 	void GetCoordinates(int width, int height, UINT16 uIn, UINT16 vIn, float uvScale, float& uOut, float& vOut) const;
 
+#ifdef SUPERMODEL_FRAME
+	struct RenderSceneStats
+	{
+		std::uint64_t trans1Candidates = 0;
+		std::uint64_t trans2Candidates = 0;
+		std::uint64_t drawCalls = 0;
+		std::uint64_t vertices = 0;
+	};
+	bool RenderScene(int priority, bool renderOverlay, Layer layer, VRRemapDiagnostic* diagnostic,
+		RenderSceneStats* stats = nullptr);	// returns if has overlay plane
+#else
 	bool RenderScene(int priority, bool renderOverlay, Layer layer, VRRemapDiagnostic* diagnostic);	// returns if has overlay plane
+#endif
 	bool IsDynamicModel(UINT32 *data) const;				// check if the model has a colour palette
 	bool IsVROMModel(UINT32 modelAddr) const;
 	void DrawScrollFog();

@@ -8,6 +8,7 @@ R3DFrameBuffers::R3DFrameBuffers()
 	m_renderBufferID = 0;
 	m_frameBufferIDCopy = 0;
 	m_renderBufferIDCopy = 0;
+	m_usingStoredDepth = false;
 	m_width = 0;
 	m_height = 0;
 	m_vao = 0;
@@ -102,8 +103,31 @@ void R3DFrameBuffers::RestoreDepth()
 	glBlitFramebuffer(0, 0, m_width, m_height, 0, 0, m_width, m_height, GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, GL_NEAREST);
 }
 
+void R3DFrameBuffers::UseStoredDepthAttachment()
+{
+	if (m_usingStoredDepth || !m_frameBufferID || !m_renderBufferIDCopy) {
+		return;
+	}
+
+	glBindFramebuffer(GL_FRAMEBUFFER, m_frameBufferID);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, m_renderBufferIDCopy);
+	m_usingStoredDepth = true;
+}
+
+void R3DFrameBuffers::UseOriginalDepthAttachment()
+{
+	if (!m_usingStoredDepth || !m_frameBufferID || !m_renderBufferID) {
+		return;
+	}
+
+	glBindFramebuffer(GL_FRAMEBUFFER, m_frameBufferID);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, m_renderBufferID);
+	m_usingStoredDepth = false;
+}
+
 void R3DFrameBuffers::DestroyFBO()
 {
+	UseOriginalDepthAttachment();
 	if (m_frameBufferID) {
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 		glDeleteRenderbuffers(1, &m_renderBufferID);
@@ -126,6 +150,7 @@ void R3DFrameBuffers::DestroyFBO()
 	m_renderBufferID = 0;
 	m_frameBufferIDCopy = 0;
 	m_renderBufferIDCopy = 0;
+	m_usingStoredDepth = false;
 	m_width = 0;
 	m_height = 0;
 }

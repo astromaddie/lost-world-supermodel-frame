@@ -126,6 +126,18 @@ Scripts/frame/build.sh
 
 The build uses two jobs, creates separate `objframe/` and `binframe/` outputs, and writes the portable archive under `dist/`. Re-running the packaging step stages and verifies both outputs before replacing the previous generated package. No ROM, NVRAM, private gun model or menu artwork is included. The independently created CC-BY-4.0 Namco Arcade Gun by Martoscar is included with its attribution and conversion manifest. `run-frame.sh --probe 30 --force-render` runs the bounded ROM-free diagnostic. Normal launch selects `ROMs/lostwsga.zip` in the persistent data tree or accepts a ROM path explicitly, resolved against the launcher's caller directory. `--flat` provides the same persistent-data launcher with the Frame-only `-no-vr` config override.
 
+## Frame-rate target and renderer cost
+
+The game simulation defaults to 60 Hz. A 120 Hz VR target requires a new head-pose render every 8.33 ms while keeping emulation at its intended speed; retained-scene redraws already support this separation.
+
+Each new emulated scene runs one flat render for authoritative light-gun LOS, followed by both eye renders. Turning off the desktop mirror suppresses the window swap, while the LOS render remains necessary. Every scene uses three RGBA8 color attachments plus depth/stencil and a depth/stencil copy buffer. The legacy path traverses opaque and two transparency layers for each present priority/overlay group, with full-size depth/stencil copies around the first transparency layer, then composites its base and transparency buffers. Textured fragments emulate the arcade filtering with manual texel fetches. These are source-confirmed costs in `New3D.cpp`, `R3DFrameBuffers.cpp`, and `R3DShaderCommon.h`; their individual contributions require measurement.
+
+Frame also flushes each eye and performs a whole-context GPU completion wait before releasing the acquired images. This handoff behavior is an independent performance variable. The diagnostic-only completion-wait switch allows matched measurement without changing normal gameplay's synchronization policy. Whole-frame timings establish the cost of the current implementation, rather than a hardware limit on rendering this scene.
+
+Frame's transparency optimization classifies eligible transparent draws during the existing opaque traversal, using the same viewport, model, alpha and overlay predicates as actual drawing. It skips an empty transparent traversal. When trans1 is empty it also skips both depth/stencil blits, since no intervening draw can change those buffers. For occupied trans1, it copies opaque depth/stencil into the existing scratch renderbuffer and attaches that scratch buffer while drawing trans1. Reattaching the untouched original buffer before trans2 preserves final depth/stencil semantics without the legacy restore blit, including trans1-only groups. Opaque passes, clears, LOS processing and compositing remain in place. Desktop builds retain the legacy pass sequence.
+
+For a bounded `-vr-game-diagnostic`, `SM_FRAME_DIAG_LEGACY_TRANSLUCENCY=1` selects the legacy sequence in the same binary. Normal Frame runs use the optimization. CPU-only `[vr-perf] translucency` records summarize source-frame ranges, eye/flat/subview groups, actual transparent draws/vertices, skipped traversals and issued/avoided depth blits every five seconds; they add no readbacks or GPU timing commands.
+
 ## Evidence scope
 
 | Gate | Evidence |
@@ -158,9 +170,28 @@ The diagnostic forced rendering during standby with fixed synthetic poses. Timed
 
 Values below are medians of the three run medians; parentheses show the range across those run medians. GPU times summarize five-second averages, rather than individual-frame percentiles.
 
+The logged `gpu` field is a broad `GL_TIME_ELAPSED` interval from before input/menu/simulation collection to the end of app rendering. CPU command-production gaps, swapchain waits inside that scope, and other GPU scheduling can contribute to elapsed time; this is not a hardware busy-time counter. The final `glFinish` and OpenXR submission are outside the query's command bracket. The CPU `worstFrame` field also ends before those calls, so it cannot measure their wait cost. The [OpenGL timer-query specification](https://registry.khronos.org/OpenGL/extensions/ARB/ARB_timer_query.txt) defines the completion interval and warns about timing on tiled renderers. These whole-frame measurements do not establish a hardware frame-rate limit.
+
 | Per-eye resolution | App submissions/s | Emulation frames/s | GPU time (ms) |
 | --- | --- | --- | --- |
 | 1080x1080 (0.5x) | 42.9 (42.9-43.5) | 59.2 (58.3-59.7) | 11.4 (11.4-11.5) |
 | 2160x2160 (1.0x) | 25.6 (25.3-25.8) | 34.7 (34.5-36.0) | 25.3 (25.3-25.6) |
 
 Full resolution used about 2.22 times the GPU time and reduced app submission rate by 40.3% in this sequence. Both settings fell below 72 submissions/s. All six runs recorded zero OpenXR/OpenGL errors. Temperature samples were partial and GPU clocks were not recorded, so these measurements establish repeatability of the observed sequence without establishing sustained thermal behavior or temporal rendering correctness. The local `dist/device-evidence/RESOLUTION-BENCHMARK.json` retains all 132 timing windows, selection rules, source/binary identity, and restoration checks.
+
+### Completion-wait control at 120 Hz (2026-10-24)
+
+Six further 115-second runs kept 2160x2160 eyes and temporarily set both the app request and SteamVR's live per-app preference to 120 Hz. Three interleaved pairs changed only the diagnostic completion-wait switch. Each run selected its own complete five-second windows within approximate emulation frames 2000-3000; these were windows 9-14 with the wait and 8-12 without it. Startup and later overlay samples were excluded. Values are medians of the three run medians.
+
+| Completion wait | App submissions/s | Emulation frames/s | Worker frame (ms) | Completed frame waiting for collection (ms) | GL completion interval (ms) |
+| --- | --- | --- | --- | --- | --- |
+| On (normal policy) | 25.7 | 25.85 | 11.95 | 26.6 | 29.55 |
+| Off (diagnostic only) | 33.5 | 33.7 | 11.5 | 18.0 | 29.7 |
+
+Skipping the wait raised app cadence by about 30% and reduced time between emulator completion and collection. The similar worker and GL completion intervals show that the explicit wait explains only part of the observed cost. All six valid runs recorded zero XR/GL errors; an initial launch missing the input feeder was excluded. Active 3D samples ran the GPU at 903 MHz with recorded temperatures of 57.8-64.1 C. The device exposed no busy-time counter. Normal synchronization, the user's 1.0 render scale, original 72 Hz preference, persistent state, launcher and audio were restored afterward. The local report retains every raw timing line and the exact selection/restoration evidence. This experiment measures scheduling response, without establishing temporal image correctness or completed 120 FPS output.
+
+### Transparency optimization validation (2026-10-24)
+
+The regression fixture uses the production framebuffer, triangle shader and composite shader, with shared draw-eligibility predicates. Seven scenes cover empty layers, either transparency layer, overlapping layers, priorities/overlays, VR visibility filters, node alpha and textured partial-alpha foliage. Each scene runs in desktop, eye and cinema modes. Comparisons require identical composite and all three color attachments, depth and nonzero stencil data; stencil sentinels explicitly check restoration after trans1. The attachment-swap variant passes all 21 comparisons at 128 and 2160 in the ARM64 Mesa build environment, retaining one copy for occupied trans1 and none for empty trans1, against two legacy copies per group.
+
+The initial empty-pass-only variant also passed all 21 comparisons on the Frame's Zink/Turnip Adreno 750 at both sizes. One matched pair of 115-second game runs kept 2160x2160 eyes, 120 Hz preference and the normal completion wait. Six complete windows per run within source frames 2000-3000 measured 25.65 submissions/s with empty-pass skipping and 26.05 with the legacy sequence. Counters confirmed fewer copies, but this pair showed no material frame-rate gain. The prior installed build and persistent state, audio and 72 Hz preference were restored. The local report retains the selected raw timing/counter pairs; this result must not be treated as a performance win for empty-pass skipping alone.

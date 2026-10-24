@@ -21,6 +21,7 @@
 
 #include "New3D.h"
 #include "VRRemapDiagnostic.h"
+#include "VRRenderPass.h"
 #include <array>
 #include "Vec.h"
 #include <cmath>
@@ -356,7 +357,12 @@ void CNew3D::DrawAmbientFog()
 	}
 }
 
+#ifdef SUPERMODEL_FRAME
+bool CNew3D::RenderScene(int priority, bool renderOverlay, Layer layer, VRRemapDiagnostic* diagnostic,
+	RenderSceneStats* stats)
+#else
 bool CNew3D::RenderScene(int priority, bool renderOverlay, Layer layer, VRRemapDiagnostic* diagnostic)
+#endif
 {
 	glActiveTexture(GL_TEXTURE0);
 	m_textureBank[0].Bind();
@@ -368,7 +374,7 @@ bool CNew3D::RenderScene(int priority, bool renderOverlay, Layer layer, VRRemapD
 
 	for (auto &n : m_nodes) {
 
-		if (n.viewport.priority != priority || n.models.empty() || !PassVRFilter(n.viewport)) {
+		if (!RenderSceneNodeEligible(n, priority, [this](const Viewport& vp) { return PassVRFilter(vp); })) {
 			continue;
 		}
 
@@ -379,18 +385,9 @@ bool CNew3D::RenderScene(int priority, bool renderOverlay, Layer layer, VRRemapD
 
 		for (auto &m : n.models) {
 
-			if (m.vrOnly && (!m_vrHandDraw || m.vrHidden)) {
-				continue;
-			}
-			if (m.vrEyeHidden && (m_vrHandDraw || m_vrFlatDraw)) {
-				continue;
-			}
+			if (!RenderSceneModelEligible(m, m_vrHandDraw, m_vrFlatDraw)) continue;
 
 			bool matrixLoaded = false;
-
-			if (m.meshes->empty()) {
-				continue;
-			}
 
 			for (auto &mesh : *m.meshes) {
 
@@ -398,8 +395,16 @@ bool CNew3D::RenderScene(int priority, bool renderOverlay, Layer layer, VRRemapD
 					hasOverlay = true;
 				}
 
-				if (!mesh.Render(layer, m.alpha)) continue;
-				if (mesh.highPriority != renderOverlay) continue;
+#ifdef SUPERMODEL_FRAME
+				// The opaque traversal already has exactly the node, model, viewport,
+				// and overlay filters needed to decide whether either transparent layer
+				// has work. Reuse it instead of scanning the whole scene a second time.
+				if (stats && layer == Layer::colour) {
+					if (RenderSceneMeshEligible(mesh, m, Layer::trans1, renderOverlay)) ++stats->trans1Candidates;
+					if (RenderSceneMeshEligible(mesh, m, Layer::trans2, renderOverlay)) ++stats->trans2Candidates;
+				}
+#endif
+				if (!RenderSceneMeshEligible(mesh, m, layer, renderOverlay)) continue;
 
 				if (!matrixLoaded) {
 					m_r3dShader.SetModelStates(&m);
@@ -408,6 +413,12 @@ bool CNew3D::RenderScene(int priority, bool renderOverlay, Layer layer, VRRemapD
 				
 				m_r3dShader.SetMeshUniforms(&mesh);
 				glDrawArrays(m_primType, mesh.vboOffset, mesh.vertexCount);
+#ifdef SUPERMODEL_FRAME
+				if (stats && (layer == Layer::trans1 || layer == Layer::trans2)) {
+					++stats->drawCalls;
+					stats->vertices += mesh.vertexCount;
+				}
+#endif
 				if (diagnostic) {
 					// Record after every production filter, using the shader's actual transform.
 					const auto& vp = n.viewport;
@@ -716,10 +727,16 @@ void CNew3D::BuildScene(void)
 
 void CNew3D::DrawScene(R3DFrameBuffers& fb, bool processLos, GLuint target)
 {
+	IVRFrameTarget* vrTarget = GetVRFrameTarget();
 	VRRemapDiagnostic* diagnostic = nullptr;
 	if (m_vrEye) {
-		if (auto* vr = GetVRFrameTarget()) diagnostic = vr->BeginSceneRemapCapture(*m_vrEye);
+		if (vrTarget) diagnostic = vrTarget->BeginSceneRemapCapture(*m_vrEye);
 	}
+#ifdef SUPERMODEL_FRAME
+	const bool reportTranslucencyStats = vrTarget && vrTarget->GameDiagnosticActive();
+	const bool forceLegacyTranslucency = reportTranslucencyStats && vrTarget->ForceLegacyTranslucency();	// diagnostic-only control
+	VRTranslucencyStats translucencyStats;
+#endif
 	// Viewport rectangles depend on the target (window or eye), so refresh them first;
 	// the fog passes below use them before RenderScene() does.
 	for (auto& n : m_nodes) {
@@ -749,7 +766,17 @@ void CNew3D::DrawScene(R3DFrameBuffers& fb, bool processLos, GLuint target)
 
 			m_r3dShader.DiscardAlpha(true);
 			m_r3dShader.SetLayer(Layer::colour);
+#ifdef SUPERMODEL_FRAME
+			RenderSceneStats opaqueStats;
+			bool hasOverlay = RenderScene(pri, renderOverlay, Layer::colour, diagnostic, &opaqueStats);
+			if (reportTranslucencyStats) {
+				++translucencyStats.candidateGroups;
+				translucencyStats.trans1Groups += opaqueStats.trans1Candidates != 0;
+				translucencyStats.trans2Groups += opaqueStats.trans2Candidates != 0;
+			}
+#else
 			bool hasOverlay = RenderScene(pri, renderOverlay, Layer::colour, diagnostic);
+#endif
 
 			if (processLos && !renderOverlay) {
 				ProcessLos(pri);
@@ -759,6 +786,56 @@ void CNew3D::DrawScene(R3DFrameBuffers& fb, bool processLos, GLuint target)
 
 			m_r3dShader.DiscardAlpha(false);
 
+#ifdef SUPERMODEL_FRAME
+			const TranslucencyPassPlan plan = PlanTranslucencyPasses(
+				opaqueStats.trans1Candidates, opaqueStats.trans2Candidates, forceLegacyTranslucency);
+			if (plan.drawTrans1) {
+				fb.StoreDepth();
+				if (reportTranslucencyStats) ++translucencyStats.depthBlitsIssued;
+				if (!forceLegacyTranslucency) fb.UseStoredDepthAttachment();
+				m_r3dShader.SetLayer(Layer::trans1);
+				fb.SetFBO(Layer::trans1);
+				RenderSceneStats trans1Stats;
+				RenderScene(pri, renderOverlay, Layer::trans1, diagnostic,
+					reportTranslucencyStats ? &trans1Stats : nullptr);
+				if (reportTranslucencyStats) {
+					translucencyStats.trans1Draws += trans1Stats.drawCalls;
+					translucencyStats.trans1Vertices += trans1Stats.vertices;
+				}
+			}
+			else if (reportTranslucencyStats) {
+				++translucencyStats.skippedTrans1Passes;
+			}
+
+			if (plan.preserveDepth) {
+				if (forceLegacyTranslucency) {
+					fb.RestoreDepth();
+					if (reportTranslucencyStats) ++translucencyStats.depthBlitsIssued;
+				}
+				else {
+					fb.UseOriginalDepthAttachment();
+					if (reportTranslucencyStats) ++translucencyStats.depthBlitsAvoided;
+				}
+			}
+			else if (reportTranslucencyStats) {
+				translucencyStats.depthBlitsAvoided += 2;
+			}
+
+			if (plan.drawTrans2) {
+				m_r3dShader.SetLayer(Layer::trans2);
+				fb.SetFBO(Layer::trans2);
+				RenderSceneStats trans2Stats;
+				RenderScene(pri, renderOverlay, Layer::trans2, diagnostic,
+					reportTranslucencyStats ? &trans2Stats : nullptr);
+				if (reportTranslucencyStats) {
+					translucencyStats.trans2Draws += trans2Stats.drawCalls;
+					translucencyStats.trans2Vertices += trans2Stats.vertices;
+				}
+			}
+			else if (reportTranslucencyStats) {
+				++translucencyStats.skippedTrans2Passes;
+			}
+#else
 			fb.StoreDepth();
 			m_r3dShader.SetLayer(Layer::trans1);
 			fb.SetFBO(Layer::trans1);
@@ -768,6 +845,7 @@ void CNew3D::DrawScene(R3DFrameBuffers& fb, bool processLos, GLuint target)
 			m_r3dShader.SetLayer(Layer::trans2);
 			fb.SetFBO(Layer::trans2);
 			RenderScene(pri, renderOverlay, Layer::trans2, diagnostic);
+#endif
 						
 			DisableRenderStates();
 
@@ -776,7 +854,7 @@ void CNew3D::DrawScene(R3DFrameBuffers& fb, bool processLos, GLuint target)
 	}
 
 	if (m_vrEye) {
-		if (auto* vr = GetVRFrameTarget()) vr->CaptureSceneLayers(*m_vrEye, fb.Framebuffer());
+		if (vrTarget) vrTarget->CaptureSceneLayers(*m_vrEye, fb.Framebuffer());
 	}
 
 	fb.SetFBO(Layer::none);
@@ -790,6 +868,15 @@ void CNew3D::DrawScene(R3DFrameBuffers& fb, bool processLos, GLuint target)
 	if (target) {
 		glBindFramebuffer(GL_FRAMEBUFFER, 0);
 	}
+
+#ifdef SUPERMODEL_FRAME
+	if (reportTranslucencyStats) {
+		const bool subview = m_vpFilter == VPFilter::subOnly;
+		const bool flat = m_vrFlatDraw || (!m_vrEye && !subview);
+		const int eye = m_vrEye && !m_vrFlatDraw ? vrTarget->DiagnosticEyeIndex(*m_vrEye) : -1;
+		vrTarget->RecordTranslucencyStats(translucencyStats, eye, flat, subview);
+	}
+#endif
 }
 
 void CNew3D::MeasureCameraTurn()
