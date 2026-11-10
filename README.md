@@ -1,25 +1,60 @@
-# The Lost World PC VR — Supermodel with OpenXR
+# The Lost World VR on Steam Frame
 
 <p align="center"><img src="Docs/Images/title-screen.jpg" width="620" alt="The Lost World: Jurassic Park title screen running in Supermodel" /></p>
 
-Play Sega's 1997 light-gun arcade game **The Lost World: Jurassic Park** in VR. This is a fork of the [Supermodel](https://github.com/trzy/Supermodel) Sega Model 3 emulator with an OpenXR mode. Your PC runs the emulator and streams it to the headset.
+This is my native Steam Frame port of [headsplosion's Lost World PC VR fork](https://github.com/headsplosion/lost-world-supermodel-pcvr) of [Supermodel](https://github.com/trzy/Supermodel). It runs Sega's 1997 light-gun game The Lost World: Jurassic Park on the headset as a Linux ARM64 app, using OpenGL and SteamVR's OpenXR runtime. No streaming PC is needed.
+
+The `steam-frame` branch adds Frame controller bindings, standalone display defaults, a bundled arcade gun, renderer fixes and a ROM-free build/package path. The upstream Windows and Linux PC VR paths are still here. [Build and install instructions](Docs/STEAM_FRAME.md) cover the Frame; [renderer notes and measurements](Docs/VR_ARCHITECTURE.md) explain the current limits.
 
 ## Features
 
 - **Stereo 3D with head tracking.** The game's 3D world is drawn around you, beyond the edges of the original 4:3 screen, and the sky carries on past them.
 - **The controller is the gun.** You can aim and shoot anywhere in the headset's view, up to a screen-width past each edge of the original screen. The game has no crosshair during play, so a red ring shows where your gun hand points. The game's own cutscene sight is hidden, so there is only ever one.
-- **A gun in your hand.** Bring your own 3D model of the arcade gun and pick its colour, blue or red, in the menu (see below).
+- **A gun in your hand.** The Frame package includes Martoscar's CC BY 4.0 arcade gun with blue/red options. You can still use your own model (see below).
 - **Recoil.** The controller vibrates while you fire.
-- **Steady 60 fps.** The game runs at its real speed whatever the headset's refresh rate, and the headset never waits for the emulator.
+- **Separate game and headset timing.** Emulation targets 60 Hz, with retained scenes redrawn for newer head poses. Actual frame rate depends on scene and eye resolution; see the Frame measurements below.
 - **Cinema mode.** Play on a big screen in a dark room, flat or in 3D. The screen keeps its size when the game's camera zooms, can sit in a TV-cabinet frame whose inner walls softly reflect the picture, and an optional glow lets the picture's colours light up the room. The aiming ring is shown on the screen.
 - **Comfort options.** A vignette darkens the edges of your view during fast camera turns.
 - **Clean overlay.** The cutscene letterbox bars are removed, in the headset and on the cinema screen. The hit "static" and full-screen fades, like the CONTINUE screen's veil, fill your whole view. Score and text follow your head during play or stay fixed in the room.
 - **In-headset options menu** in the colours of the game's InGen screens. Every setting can be changed from the headset and is saved straight away.
 - **Fast start.** After the first run, the game opens at the start of its attract demo; the start-up screens are skipped.
 
-Developed and tested on a Meta Quest 3 streamed with **Virtual Desktop** (VDXR runtime). Meta Quest Link and SteamVR are standard OpenXR runtimes and should work too.
+The upstream PC VR port was developed with Quest 3 and Virtual Desktop (VDXR). Steam Frame uses the native Linux build described here.
 
 > **No game files are included.** You need your own `lostwsga.zip` ROM set (The Lost World, Japan, Revision A), dumped from hardware you own. Please don't open issues or pull requests asking for ROMs.
+
+## Steam Frame Quick Start
+
+Build the package with the instructions below, then copy and extract
+`dist/lost-world-supermodel-frame-linux-arm64.tar.gz` on the Frame. Add the extracted
+`run-frame.sh` to Steam as a non-Steam game, using Steam Linux Runtime 4 ARM64 for
+tracked-controller play. Launch it from the Steam library.
+
+Put your own `lostwsga.zip` in
+`~/.local/share/lost-world-supermodel-frame/ROMs/`, creating that folder if needed.
+You can also pass an absolute ROM path in the shortcut's launch options. Settings,
+NVRAM and saves stay in that data tree when you replace the app. If `XDG_DATA_HOME`
+is set, the launcher uses it instead of `~/.local/share`.
+
+| Frame Control | Action |
+| --- | --- |
+| Gun-hand trigger / squeeze | Fire / reload |
+| Right A or Y | Start |
+| Right B or X | Insert coin |
+| Right Menu | Open or close the options panel |
+| Left View, tap | Close an open panel |
+| Left View, hold one second | Recentre, with a pulse in both hands |
+
+The defaults are 1080 × 1080 per eye, a 72 Hz request and no desktop mirror. The
+render-resolution option reaches 2160 × 2160 at 1.0× on the next launch. A refresh
+request isn't a frame-rate guarantee: the latest matched opening-scene measurement
+at 2160 × 2160 was about 32 app submissions/s with the optimized transparency path,
+compared with 27 for the legacy path. See [the conditions and results](Docs/VR_ARCHITECTURE.md#transparency-optimization-validation-2026-10-24)
+before comparing those numbers with other scenes or settings.
+
+[The Frame guide](Docs/STEAM_FRAME.md) covers installation, persistent data, flat
+mode, diagnostics and build troubleshooting. The options below are shared with the
+PC port, apart from the Frame control map above.
 
 ## Quick start (Windows)
 
@@ -58,8 +93,8 @@ In the options menu, point at an option and pull the trigger.
 | | Screen bezel | Off / On: the cinema screen sits in a TV-cabinet frame that reflects the picture |
 | | Screen glow | Off / Subtle / Strong: the picture lights up the room around the cinema screen |
 | **Gun** | Gun hand | Right / Left |
-| | Gun model in your hand | Off / Game (`Assets/VRGameGun.obj`) / Custom (`Assets/VRGunModel.obj`) |
-| | Gun colour | Blue / Red, for the Game model (shown when `VRGameGun.obj` is there) |
+| | Gun model in your hand | Off / Game (bundled on Frame, or `Assets/VRGameGun.obj`) / Custom (`Assets/VRGunModel.obj`) |
+| | Gun colour | Blue / Red, for the bundled Frame Game model or your `VRGameGun.obj` |
 | | Recoil vibration | Off / Light / Strong |
 | | Aim fine-tune | Nudge the aim left/right and up/down in 0.1° steps |
 | **Screen** | Score / timer / text | Fixed in the room / Follow head / Auto (head during play) |
@@ -76,17 +111,50 @@ For the smoothest play in Virtual Desktop, set Synchronous Spacewarp to **Disabl
 
 ## Building
 
-**Windows (what the CI does):** in MSYS2 with `mingw-w64-x86_64-gcc`, `SDL2` and `SDL2_net` installed, run:
+### Steam Frame (Linux ARM64)
 
+Use Git and a running Docker engine that can execute Linux ARM64 containers. Apple
+Silicon macOS and ARM64 Linux can run them natively. An x86-64 Linux, Intel Mac or
+Windows/WSL host needs ARM64 emulation in Docker; this isn't a native Windows or
+macOS application build.
+
+```sh
+git clone -b steam-frame https://github.com/astromaddie/lost-world-supermodel-frame.git
+cd lost-world-supermodel-frame
+./Scripts/frame/build.sh
 ```
-make -f Makefiles/Makefile.Win32 release
+
+The script builds the pinned Ubuntu 22.04 ARM64 toolchain image, compiles with two
+jobs, packages `dist/lost-world-supermodel-frame-linux-arm64.tar.gz`, then runs the
+host checks. No ROM is needed. It rebuilds `objframe/` and `binframe/`; keep your
+personal data outside generated output directories. See [the full build guide](Docs/STEAM_FRAME.md#building-from-source)
+for prerequisites, exact outputs and what the checks cover.
+
+### Upstream PC Builds
+
+Windows uses MSYS2 with `make`, `mingw-w64-x86_64-gcc`,
+`mingw-w64-x86_64-SDL2` and `mingw-w64-x86_64-SDL2_net`:
+
+```sh
+make -j2 -f Makefiles/Makefile.Win32 release
 ```
 
-Then add `openxr_loader.dll` from the [Khronos OpenXR SDK](https://github.com/KhronosGroup/OpenXR-SDK-Source/releases). See [`.github/workflows/pcvr-windows.yml`](.github/workflows/pcvr-windows.yml) for the full packaging. Every push builds a zip; a push to `main` publishes it as the release for the version in `VERSION`.
+Add `openxr_loader.dll` from the Khronos OpenXR SDK. The
+[Windows workflow](.github/workflows/pcvr-windows.yml) has the packaging steps. It
+runs on pushes to `main`, `v*` tags, pull requests and manual dispatch, not ordinary
+pushes to `steam-frame`. It doesn't build the Frame archive.
 
-**Linux:** run `make -f Makefiles/Makefile.UNIX NET_BOARD=0`. This builds the same VR code on GLX and is handy for testing with [Monado](https://monado.freedesktop.org/). The OpenXR headers are vendored in `Src/Pkgs/openxr`, and the loader is loaded at run time, so non-VR use doesn't need it.
+For a desktop Linux build, install the SDL2 and SDL2_net development packages,
+OpenGL/GLU, X11 and zlib headers, a C++ toolchain and Make, then run:
 
-Start it with `supermodel <rom.zip> -vr -window -res=992,768 -no-wide-screen`.
+```sh
+make -j2 -f Makefiles/Makefile.UNIX NET_BOARD=0
+```
+
+Use `supermodel <rom.zip> -vr -window -res=992,768 -no-wide-screen` with an active
+OpenXR runtime. The headers are vendored in `Src/Pkgs/openxr`; the loader is loaded
+at runtime, so non-VR use doesn't need it. Use `Makefile.Frame` through the Docker
+script for the Frame-specific defaults and portable ARM64 package.
 
 ## How it works
 
