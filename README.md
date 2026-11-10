@@ -1,3 +1,24 @@
+## Steam Frame
+
+The standalone Frame port is on [`steam-frame`](https://github.com/astromaddie/lost-world-supermodel-frame/tree/steam-frame).
+It runs natively on Linux ARM64 with OpenGL and OpenXR. The Frame additions include
+tracked-controller aiming, Frame button bindings, recentering, portable packaging
+and persistent settings outside the install folder.
+
+The [Frame guide](https://github.com/astromaddie/lost-world-supermodel-frame/blob/steam-frame/Docs/STEAM_FRAME.md)
+covers building, packaging, game data and launching from Steam. You need your own
+Lost World ROM; the package doesn't include it.
+
+```sh
+git clone --recurse-submodules --branch steam-frame https://github.com/astromaddie/lost-world-supermodel-frame.git
+cd lost-world-supermodel-frame
+```
+
+The original PC VR README for `main` follows. Use the Frame guide above for
+standalone builds rather than the Windows instructions below.
+
+---
+
 # The Lost World PC VR — Supermodel with OpenXR
 
 <p align="center"><img src="Docs/Images/title-screen.jpg" width="620" alt="The Lost World: Jurassic Park title screen running in Supermodel" /></p>
